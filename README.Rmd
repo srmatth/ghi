@@ -1,0 +1,27 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# The Golden Health Index (GHI)
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+This repository contains both an R package for computing the golden health index (currently under construction) as well as the code used for the analyses presented in the Golden Health Index paper.
+
+## Repository Structure
+
+Currently the package part is under construction. However, all code used in the paper can be found in the `inst/paper_code` directory. These files are listed in order with helpful names and comments inside. Note that some code may not run on your machine due to the data not being available in this repository.
+
+## Contact
+
+For any questions regarding the code, please reach out to Spencer Matthews at spencer.matthews@uci.edu.
