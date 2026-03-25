@@ -11,7 +11,13 @@ library(data.table)
 
 A0 <- 65
 
-mod_dat <- read_csv("inst/extdata/NACC_mod_dat.csv")
+DATA_DIR <- "inst/extdata" # Replace this with your data directory
+
+if (fs::file_exists(fs::path(DATA_DIR, "NACC_mod_dat.csv"))) {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat.csv"))
+} else {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat_simulated.csv"))
+}
 
 ## Data Exploration ----
 

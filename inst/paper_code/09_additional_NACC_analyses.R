@@ -14,9 +14,19 @@ library(fs)
 
 A0 <- 65
 
-# Subjects who have died and for whom there is APOE info
-nacc_sub <- read_csv("~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv")%>%
-  filter(NACCDIED == 1)
+DATA_DIR <- "inst/extdata" # Replace this with your data directory
+
+# NOTE: This section requires access to the full NACC dataset which is not
+# publicly available. The code will be skipped if the file does not exist.
+
+NACC_FULL_DATA <- "~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv"
+
+if (file.exists(NACC_FULL_DATA)) {
+  cat("Running marital status change analysis (requires full NACC data)...\n")
+
+  # Subjects who have died and for whom there is APOE info
+  nacc_sub <- read_csv(NACC_FULL_DATA) %>%
+    filter(NACCDIED == 1)
 
 over_65 <- nacc_sub %>%
   filter(NACCAGE >= A0)
@@ -45,9 +55,13 @@ maristat <- over_65_dementia_free %>%
   ) %>%
   ungroup()
 
-table(maristat$baseline_status, maristat$ending_status)
+  table(maristat$baseline_status, maristat$ending_status)
 
-mean(maristat$baseline_status == maristat$ending_status)
+  mean(maristat$baseline_status == maristat$ending_status)
+} else {
+  cat("Skipping marital status analysis - full NACC dataset not available.\n")
+  cat("This section requires: ", NACC_FULL_DATA, "\n")
+}
 
 ## 2. Survival Models ----
 
@@ -59,7 +73,13 @@ library(ltrc)
 
 ## Marginal Death Model ----
 
-nacc_sub <- read_csv("~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv")
+# NOTE: This section requires access to the full NACC dataset which is not
+# publicly available. The code will be skipped if the file does not exist.
+
+if (file.exists(NACC_FULL_DATA)) {
+  cat("Running marginal death model analysis (requires full NACC data)...\n")
+
+  nacc_sub <- read_csv(NACC_FULL_DATA)
 
 over_65 <- nacc_sub %>%
   filter(NACCAGE >= 65)
@@ -151,12 +171,22 @@ cox_mod <- coxph(
   data = mod_dat
 )
 
-summary(cox_mod)
+  summary(cox_mod)
+} else {
+  cat("Skipping marginal death model analysis - full NACC dataset not available.\n")
+  cat("This section requires: ", NACC_FULL_DATA, "\n")
+}
 
 
 ## Marginal AD Model ----
 
-mod_dat <- read_csv("inst/extdata/NACC_mod_dat.csv") %>%
+if (fs::file_exists(fs::path(DATA_DIR, "NACC_mod_dat.csv"))) {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat.csv"))
+} else {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat_simulated.csv"))
+}
+
+mod_dat <- mod_dat %>%
   mutate(
     num_e4_1 = ifelse(num_e4 == 1, 1, 0),
     num_e4_2 = ifelse(num_e4 == 2, 1, 0),

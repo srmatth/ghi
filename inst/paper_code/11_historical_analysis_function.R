@@ -1,15 +1,22 @@
 ## Function to run the analysis as if it were any point in the past
 
+# NOTE: This function requires access to the full NACC dataset which is not
+# publicly available. Define NACC_FULL_DATA before calling this function.
 
 library(ltrc)
 
-run_analysis_in_past <- function(date) {
+run_analysis_in_past <- function(date, nacc_data_path = "~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv") {
+  if (!file.exists(nacc_data_path)) {
+    stop("NACC data file not found: ", nacc_data_path, "\n",
+         "This function requires access to the full NACC dataset.")
+  }
+
   cat("\n\n===========================================")
   cat("\n RUNNING ANALYSIS FOR:", date)
   cat("\n===========================================\n\n")
   A0 <- 65
 
-  nacc_sub <- read_csv("~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv")%>%
+  nacc_sub <- read_csv(nacc_data_path) %>%
     filter(NACCDIED == 1)
 
   over_65 <- nacc_sub %>%

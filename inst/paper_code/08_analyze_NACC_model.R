@@ -13,9 +13,23 @@ library(xtable)
 
 A0 <- 65
 
-mod_dat <- read_csv("inst/extdata/NACC_mod_dat.csv")
-part_2_mod_clean <- read_rds("inst/extdata/nacc_pt_2_mod.rds")
-part_1_mod <- read_rds("inst/extdata/nacc_pt_1_mod.rds")
+DATA_DIR <- "inst/extdata" # Replace this with your data directory
+
+if (fs::file_exists(fs::path(DATA_DIR, "NACC_mod_dat.csv"))) {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat.csv"))
+} else {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat_simulated.csv"))
+}
+
+part_2_mod_clean <- read_rds(fs::path(DATA_DIR, "nacc_pt_2_mod.rds"))
+part_1_mod <- read_rds(fs::path(DATA_DIR, "nacc_pt_1_mod.rds"))
+mod_dat <- mod_dat %>%
+  mutate(
+    num_e4_1 = ifelse(num_e4 == 1, 1, 0),
+    num_e4_2 = ifelse(num_e4 == 2, 1, 0)
+  )
+dem_mod_dat <- mod_dat %>%
+  filter(got_dementia == 1)
 
 ## Table of Coefficients ----
 
@@ -120,32 +134,47 @@ res <- purrr::pmap_dfr(
 )
 
 ## Get Bootstrap iterations
-bs_res <- data.frame()
-for (f in dir_ls("inst/sim_res/NACC_mod_bs_with_race")) {
-  tmp <- read_csv(f)
-  bs_res <- bs_res %>%
-    bind_rows(tmp)
+# Check if bootstrap results exist
+bs_dir <- "inst/sim_res/NACC_mod_bs_with_race"
+if (fs::dir_exists(bs_dir) && length(dir_ls(bs_dir)) > 0) {
+  cat("Loading bootstrap results for variance estimation...\n")
+  bs_res <- data.frame()
+  for (f in dir_ls(bs_dir)) {
+    tmp <- read_csv(f)
+    bs_res <- bs_res %>%
+      bind_rows(tmp)
+  }
+
+  bs_sds <- bs_res %>%
+    left_join(
+      res %>%
+        mutate(lower_lp = lp_y - 5*sd_lp_y, upper_lp = lp_y + 5*sd_lp_y) %>%
+        select(t, educ, is_female, is_married, has_comorbidity, e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l, lower_lp, upper_lp)
+    ) %>%
+    # filter(lp_y > lower_lp, lp_y < upper_lp) %>%
+    group_by(t, educ, is_female, is_married, has_comorbidity, e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l) %>%
+    summarize(
+      var_y = var(expected_y)
+    )
+
+  res_w_var <- res %>%
+    left_join(bs_sds) %>%
+    mutate(
+      var_ghi = (1 - expected_y)^2 * var_mu + (1 - mu)^2 * var_y,
+      sd_ghi = sqrt(var_ghi)
+    )
+} else {
+  cat("Bootstrap results not found. Proceeding without bootstrap variance estimates.\n")
+  cat("Note: Confidence intervals will not be available in plots.\n")
+
+  # Create res_w_var without bootstrap variance
+  res_w_var <- res %>%
+    mutate(
+      var_y = NA_real_,
+      var_ghi = NA_real_,
+      sd_ghi = NA_real_
+    )
 }
-
-
-bs_sds <- bs_res %>%
-  left_join(
-    res %>%
-      mutate(lower_lp = lp_y - 5*sd_lp_y, upper_lp = lp_y + 5*sd_lp_y) %>%
-      select(t, educ, is_female, is_married, has_comorbidity, e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l, lower_lp, upper_lp)
-  ) %>%
-  # filter(lp_y > lower_lp, lp_y < upper_lp) %>%
-  group_by(t, educ, is_female, is_married, has_comorbidity, e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l) %>%
-  summarize(
-    var_y = var(expected_y)
-  )
-
-res_w_var <- res %>%
-  left_join(bs_sds) %>%
-  mutate(
-    var_ghi = (1 - expected_y)^2 * var_mu + (1 - mu)^2 * var_y,
-    sd_ghi = sqrt(var_ghi)
-  )
 
 #### Big Plots ----
 
@@ -179,7 +208,7 @@ res_w_var %>%
   ) %>%
   ggplot() +
   aes(x = t + 65, y = ghi_estimate, color = as.factor(num_e4), fill = as.factor(num_e4)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA) +
+  {if(all(!is.na(res_w_var$sd_ghi))) geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA)} +
   geom_line(aes(lty = as.factor(num_e4)), size = 1) +
   facet_grid(Group ~ Race, labeller = "label_value") +
   theme_bw() +
@@ -226,7 +255,7 @@ res_w_var %>%
   ) %>%
   ggplot() +
   aes(x = t + 65, y = ghi_estimate, color = as.factor(num_e4), fill = as.factor(num_e4)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA) +
+  {if(all(!is.na(res_w_var$sd_ghi))) geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA)} +
   geom_line(aes(lty = as.factor(num_e4)), size = 1) +
   facet_grid(Group ~ Race, labeller = "label_value") +
   theme_bw() +

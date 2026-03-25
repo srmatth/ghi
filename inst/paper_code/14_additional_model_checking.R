@@ -7,7 +7,13 @@ library(ltrc)
 
 ## Part 1 Model ----
 
-mod_dat <- read_csv("inst/extdata/NACC_mod_dat.csv")
+DATA_DIR <- "inst/extdata" # Replace this with your data directory
+
+if (fs::file_exists(fs::path(DATA_DIR, "NACC_mod_dat.csv"))) {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat.csv"))
+} else {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat_simulated.csv"))
+}
 
 part_1_mod <- glm(
   got_dementia ~ t + years_education + is_female + is_married + comorbidity + as.factor(num_e4) + is_race_black + is_race_other + l,
@@ -173,23 +179,6 @@ hl_data <- data.frame(
   expected = hl$expected[, 2],
   group = seq_len(nrow(hl$observed))
 )
-
-# hl_data %>%
-#   ggplot() +
-#   aes(x = expected, y = observed) +
-#   geom_point() +
-#   geom_abline(slope = 1, intercept = 0, color = "red", lty = "dashed") +
-#   xlab("Expected Events") +
-#   ylab("Observed Events") +
-#   theme_bw() +
-#   theme(
-#     legend.position = "bottom",
-#     text = element_text(family = "Times"),
-#     strip.background = element_blank(),
-#     strip.text = element_text(size = 15),
-#     axis.text = element_text(size = 15),
-#     axis.title = element_text(size = 18)
-#   )
 
 calib <- mod_dat %>%
   mutate(
@@ -401,4 +390,97 @@ ggplot() +
     axis.text = element_text(size = 15),
     axis.title = element_text(size = 18)
   )
+
+### QQ Plot: Residuals vs. Truncated Normal ----
+# This demonstrates that the Part 2 model residuals do NOT follow a truncated
+# normal distribution, justifying the use of the semiparametric LTRC approach.
+
+library(truncnorm)
+
+# Get model residuals and truncation points
+resids <- as.numeric(part_2_mod_clean$data$residuals)
+# need to subtract the linear predictor to get the truncation time on the same scale as the residuals
+trunc_points <- dem_mod_dat$mod_l - part_2_mod_clean$data$fitted_response
+sum(trunc_points > resids) # sanity check
+
+# Estimate parameters assuming truncated normal (MLE under truncation)
+# Using method of moments as starting point, then refining
+resid_mean_init <- mean(resids)
+resid_sd_init <- sd(resids)
+
+# Fit truncated normal via maximum likelihood
+neg_loglik <- function(par, t, l) {
+  mu <- par[1]
+  sigma <- exp(par[2])
+
+  z_t <- (t - mu) / sigma
+  z_l <- (l - mu) / sigma
+
+  ll <- sum(
+    dnorm(z_t, log = TRUE) - log(sigma) -
+      pnorm(z_l, lower.tail = FALSE, log.p = TRUE)
+  )
+
+  return(-ll)
+}
+
+# Optimize
+fit_trunc <- optim(
+  par = c(resid_mean_init, log(resid_sd_init)),
+  fn = neg_loglik,
+  t = resids,
+  l = trunc_points,
+  method = "BFGS"
+)
+
+mu_hat <- fit_trunc$par[1]
+sigma_hat <- exp(fit_trunc$par[2])
+
+cat("Fitted truncated normal parameters:\n")
+cat("  mu =", round(mu_hat, 4), "\n")
+cat("  sigma =", round(sigma_hat, 4), "\n\n")
+
+# Transform residuals to uniform via truncated normal CDF, then to standard normal
+# If residuals truly follow TruncNorm(mu, sigma, a=l_i), then z should be N(0,1)
+u <- (pnorm((resids - mu_hat) / sigma_hat) - pnorm((trunc_points - mu_hat) / sigma_hat)) /
+  (1 - pnorm((trunc_points - mu_hat) / sigma_hat))
+z <- qnorm(u)
+
+# Remove any infinite/NA values
+z_clean <- z[is.finite(z)]
+
+# Create QQ plot data for ggplot
+n <- length(z_clean)
+theoretical_quantiles <- qnorm(ppoints(n))
+observed_sorted <- sort(z_clean)
+
+qq_df <- data.frame(
+  theoretical = theoretical_quantiles,
+  observed = observed_sorted
+)
+
+# QQ Plot with ggplot
+qq_trunc_plot <- ggplot(qq_df) +
+  geom_point(aes(y = theoretical, x = observed), alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", lty = "dashed", linewidth = 1) +
+  labs(
+    title = "Part 2: QQ Plot of Residuals vs. Truncated Normal",
+    subtitle = "If residuals follow truncated normal, points should lie on the line",
+    y = "Theoretical Quantiles (Standard Normal)",
+    x = "Transformed Residuals"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    text = element_text(family = "Times"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    axis.title = element_text(size = 18),
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12)
+  )
+
+print(qq_trunc_plot)
+
 

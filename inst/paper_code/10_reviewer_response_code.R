@@ -1,5 +1,8 @@
 ## Explorations of NACC for Reviewers ----
 
+# NOTE: This entire script requires access to the full NACC dataset which is not
+# publicly available. The code will be skipped if the file does not exist.
+
 ## Setup ----
 
 library(readr)
@@ -17,8 +20,22 @@ library(TMB)
 
 A0 <- 65
 
+NACC_FULL_DATA <- "~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv"
+
+if (!file.exists(NACC_FULL_DATA)) {
+  cat("====================================================================\n")
+  cat("SKIPPING: 10_reviewer_response_code.R\n")
+  cat("This script requires access to the full NACC dataset which is not\n")
+  cat("publicly available. Expected file location:\n")
+  cat("  ", NACC_FULL_DATA, "\n")
+  cat("====================================================================\n")
+  quit(save = "no")
+}
+
+cat("Running reviewer response analyses (requires full NACC data)...\n")
+
 # get the data
-nacc_sub <- read_csv("~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv")
+nacc_sub <- read_csv(NACC_FULL_DATA)
 
 dataset <- nacc_sub %>%
   mutate(
@@ -551,7 +568,7 @@ summary(rep)
 
 A0 <- 65
 
-nacc_sub <- read_csv("~/Documents/Data/NACC/2025-01-22_healthspan_analysis_subset.csv")%>%
+nacc_sub <- read_csv(NACC_FULL_DATA)%>%
   filter(NACCDIED == 1)
 
 over_65 <- nacc_sub %>%

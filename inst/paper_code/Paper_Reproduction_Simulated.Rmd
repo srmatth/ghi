@@ -1,0 +1,2421 @@
+---
+title: "Golden Health Index Regression: Full Reproduction"
+subtitle: "Interactive Analysis Notebook for Reviewers"
+author: "Generated from Paper Code"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  cache = FALSE
+)
+```
+
+# Overview
+
+This notebook provides a complete walkthrough of the analyses presented in our paper on Golden Health Index (GHI) Regression. It is designed to be run by reviewers using **simulated data** that matches the structure and properties of the original NACC dataset.
+
+## What This Notebook Does
+
+1. **Setup**: Install dependencies and configure paths
+2. **Data Exploration**: Create Table 1 (descriptive statistics)
+3. **Model Fitting**: Fit the two-part model (GLM + LTRC)
+4. **Model Analysis**: Generate Table 2 (coefficient estimates) and Figures 1-2
+5. **Model Checking**: Comprehensive diagnostics for both model parts
+6. **Sensitivity Analyses**: ADRC, temporal, and weighted analyses
+7. **Simulation Study**: Small-scale demonstration
+
+## Important Notes
+
+- This notebook uses **simulated data** generated from fitted models
+- Results will differ from the paper (which uses real NACC data), but the structure and methods are identical
+- Computationally intensive sections (bootstrap variance) include warnings and alternatives
+- All code can be run locally on a standard laptop
+- **ADRC random effects analysis** requires TMB (Template Model Builder):
+  - The `inst/paper_code/model/truncated_lmm.cpp` file will be automatically compiled
+  - Requires a C++ compiler (Rtools on Windows, Xcode on Mac, g++ on Linux)
+  - TMB installation: `install.packages("TMB")`
+
+---
+
+# 1. Setup {.tabset}
+
+## Dependencies
+
+First, let's install and load all required packages:
+
+```{r install-packages, eval=FALSE}
+# Install packages if needed
+packages <- c(
+  "readr", "dplyr", "ggplot2", "lubridate", "stringr", "patchwork",
+  "fs", "data.table", "survival", "tictoc", "xtable", "purrr",
+  "ResourceSelection", "car", "splines", "lme4", "sandwich", "lmtest",
+  "truncreg", "statmod", "truncnorm", "TMB"
+)
+
+install.packages(setdiff(packages, rownames(installed.packages())))
+
+# Install ltrc package (if not already installed)
+if (!"ltrc" %in% rownames(installed.packages())) {
+  devtools::install_github("srmatth/ltrc")
+}
+```
+
+```{r load-packages}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(stringr)
+library(patchwork)
+library(fs)
+library(data.table)
+library(survival)
+library(tictoc)
+library(xtable)
+library(ResourceSelection)
+library(car)
+library(splines)
+library(lme4)
+library(sandwich)
+library(lmtest)
+library(purrr)
+
+# Load ltrc if available
+if (require("ltrc", quietly = TRUE)) {
+  library(ltrc)
+} else {
+  warning("ltrc package not loaded. Some analyses will not run.")
+}
+```
+
+## Configure Paths
+
+Set up directory paths for data and results:
+
+```{r configure-paths}
+# Base reference age
+A0 <- 65
+
+# Data directory
+DATA_DIR <- "~/Documents/repos/ghi/inst/extdata" # MAY NEED TO CHANGE THIS
+if (!dir.exists(DATA_DIR)) {
+  dir.create(DATA_DIR, recursive = TRUE)
+}
+
+# Results directory
+RESULTS_DIR <- "~/Documents/repos/ghi/inst/paper_results"
+if (!dir.exists(RESULTS_DIR)) {
+  dir.create(RESULTS_DIR, recursive = TRUE)
+}
+
+# Bootstrap results directory (for variance estimation)
+BOOTSTRAP_DIR <- "~/Documents/repos/ghi/inst/sim_res/NACC_mod_bs_with_race"
+if (!dir.exists(BOOTSTRAP_DIR)) {
+  dir.create(BOOTSTRAP_DIR, recursive = TRUE)
+}
+
+cat("✓ Directories configured\n")
+cat("  Data:", DATA_DIR, "\n")
+cat("  Results:", RESULTS_DIR, "\n")
+cat("  Bootstrap:", BOOTSTRAP_DIR, "\n")
+```
+
+## Load Data
+
+Load the simulated NACC dataset:
+
+```{r load-data}
+# Automatically use simulated data if real data not available
+if (fs::file_exists(fs::path(DATA_DIR, "NACC_mod_dat.csv"))) {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat.csv"))
+  cat("✓ Loaded real NACC data\n")
+} else if (fs::file_exists(fs::path(DATA_DIR, "NACC_mod_dat_simulated.csv"))) {
+  mod_dat <- read_csv(fs::path(DATA_DIR, "NACC_mod_dat_simulated.csv"))
+  cat("✓ Loaded simulated NACC data\n")
+  cat("⚠ Note: Results will differ from paper (using simulated data)\n")
+} else {
+  stop("No data file found. Please ensure data directory is correct.")
+}
+
+# Display data structure
+cat("\nDataset dimensions:", nrow(mod_dat), "observations,", ncol(mod_dat), "variables\n")
+glimpse(mod_dat)
+```
+
+---
+
+# 2. Data Exploration
+
+This section reproduces **Table 1** from the main paper, showing descriptive statistics overall and stratified by APOE ε4 allele status.
+
+## Overall Sample Characteristics
+
+```{r table1-overall}
+# Sample size
+n_total <- nrow(mod_dat)
+n_dementia <- sum(mod_dat$got_dementia)
+n_no_dementia <- sum(mod_dat$got_dementia == 0)
+
+# Age at study entry
+age_entry_mean <- mean(mod_dat$age_at_study_entry)
+age_entry_sd <- sd(mod_dat$age_at_study_entry)
+
+# Age at death
+age_death_mean <- mean(mod_dat$age_at_death)
+age_death_sd <- sd(mod_dat$age_at_death)
+
+# Age at dementia (among those with dementia)
+age_dementia_mean <- mean(mod_dat$age_at_dementia[mod_dat$got_dementia == 1], na.rm = TRUE)
+age_dementia_sd <- sd(mod_dat$age_at_dementia[mod_dat$got_dementia == 1], na.rm = TRUE)
+
+# Sex
+n_female <- sum(mod_dat$is_female)
+pct_female <- mean(mod_dat$is_female) * 100
+
+# Education
+educ_mean <- mean(mod_dat$years_education)
+educ_sd <- sd(mod_dat$years_education)
+
+# Marital status
+n_married <- sum(mod_dat$is_married)
+pct_married <- mean(mod_dat$is_married) * 100
+
+# Comorbidity
+n_comorbidity <- sum(mod_dat$comorbidity)
+pct_comorbidity <- mean(mod_dat$comorbidity) * 100
+
+# Race
+n_white <- sum(mod_dat$is_race_white)
+pct_white <- mean(mod_dat$is_race_white) * 100
+n_black <- sum(mod_dat$is_race_black)
+pct_black <- mean(mod_dat$is_race_black) * 100
+n_other <- sum(mod_dat$is_race_other)
+pct_other <- mean(mod_dat$is_race_other) * 100
+
+# APOE ε4 alleles
+n_e4_0 <- sum(mod_dat$num_e4 == 0)
+pct_e4_0 <- mean(mod_dat$num_e4 == 0) * 100
+n_e4_1 <- sum(mod_dat$num_e4 == 1)
+pct_e4_1 <- mean(mod_dat$num_e4 == 1) * 100
+n_e4_2 <- sum(mod_dat$num_e4 == 2)
+pct_e4_2 <- mean(mod_dat$num_e4 == 2) * 100
+
+# Create summary table
+table1_overall <- data.frame(
+  Characteristic = c(
+    "Sample size",
+    "Age at study entry, mean (SD)",
+    "Dementia status, n (%)",
+    "  Developed dementia",
+    "  Did not develop dementia",
+    "Age at death, mean (SD)",
+    "Age at dementia onset (if dementia), mean (SD)",
+    "Female, n (%)",
+    "Years of education, mean (SD)",
+    "Married, n (%)",
+    "≥1 Comorbidity, n (%)",
+    "Race, n (%)",
+    "  White",
+    "  Black",
+    "  Other",
+    "APOE ε4 alleles, n (%)",
+    "  0",
+    "  1",
+    "  2"
+  ),
+  Value = c(
+    as.character(n_total),
+    sprintf("%.1f (%.1f)", age_entry_mean, age_entry_sd),
+    "",
+    sprintf("%d (%.1f%%)", n_dementia, n_dementia/n_total*100),
+    sprintf("%d (%.1f%%)", n_no_dementia, n_no_dementia/n_total*100),
+    sprintf("%.1f (%.1f)", age_death_mean, age_death_sd),
+    sprintf("%.1f (%.1f)", age_dementia_mean, age_dementia_sd),
+    sprintf("%d (%.1f%%)", n_female, pct_female),
+    sprintf("%.1f (%.1f)", educ_mean, educ_sd),
+    sprintf("%d (%.1f%%)", n_married, pct_married),
+    sprintf("%d (%.1f%%)", n_comorbidity, pct_comorbidity),
+    "",
+    sprintf("%d (%.1f%%)", n_white, pct_white),
+    sprintf("%d (%.1f%%)", n_black, pct_black),
+    sprintf("%d (%.1f%%)", n_other, pct_other),
+    "",
+    sprintf("%d (%.1f%%)", n_e4_0, pct_e4_0),
+    sprintf("%d (%.1f%%)", n_e4_1, pct_e4_1),
+    sprintf("%d (%.1f%%)", n_e4_2, pct_e4_2)
+  )
+)
+
+knitr::kable(table1_overall, caption = "Table 1: Overall Sample Characteristics", align = "lr")
+```
+
+## Characteristics by APOE ε4 Status
+
+```{r table1-stratified}
+# Create stratified summaries
+table1_stratified <- mod_dat %>%
+  group_by(num_e4) %>%
+  summarize(
+    n = n(),
+    age_entry = sprintf("%.1f (%.1f)", mean(age_at_study_entry), sd(age_at_study_entry)),
+    n_dementia = sum(got_dementia),
+    pct_dementia = sprintf("%.1f%%", mean(got_dementia) * 100),
+    age_death = sprintf("%.1f (%.1f)", mean(age_at_death), sd(age_at_death)),
+    age_dementia = sprintf("%.1f (%.1f)",
+                          mean(age_at_dementia[got_dementia == 1], na.rm = TRUE),
+                          sd(age_at_dementia[got_dementia == 1], na.rm = TRUE)),
+    n_female = sum(is_female),
+    pct_female = sprintf("%.1f%%", mean(is_female) * 100),
+    educ = sprintf("%.1f (%.1f)", mean(years_education), sd(years_education)),
+    n_married = sum(is_married),
+    pct_married = sprintf("%.1f%%", mean(is_married) * 100),
+    n_comorbid = sum(comorbidity),
+    pct_comorbid = sprintf("%.1f%%", mean(comorbidity) * 100),
+    n_white = sum(is_race_white),
+    pct_white = sprintf("%.1f%%", mean(is_race_white) * 100),
+    n_black = sum(is_race_black),
+    pct_black = sprintf("%.1f%%", mean(is_race_black) * 100)
+  ) %>%
+  t() %>%
+  as.data.frame()
+
+colnames(table1_stratified) <- c("0 ε4 alleles", "1 ε4 allele", "2 ε4 alleles")
+
+knitr::kable(table1_stratified,
+             caption = "Table 1 (continued): Characteristics Stratified by APOE ε4 Status")
+```
+
+---
+
+# 3. Model Fitting
+
+This section fits the two-part model:
+- **Part 1**: Logistic regression for dementia probability
+- **Part 2**: Left-truncated right-censored (LTRC) model for timing among those with dementia
+
+## Part 1: Dementia Probability (GLM)
+
+```{r fit-part1}
+cat("Fitting Part 1 model (logistic regression)...\n")
+tic()
+
+part_1_mod <- glm(
+  got_dementia ~ t + years_education + is_female + is_married + comorbidity +
+    as.factor(num_e4) + is_race_black + is_race_other + l,
+  data = mod_dat,
+  family = "binomial"
+)
+
+toc()
+
+# Summary
+summary(part_1_mod)
+
+# Save model
+write_rds(part_1_mod, fs::path(DATA_DIR, "nacc_pt_1_mod_sim.rds"))
+cat("\n✓ Part 1 model saved to:", fs::path(DATA_DIR, "nacc_pt_1_mod_sim.rds"), "\n")
+```
+
+## Part 2: Timing of Dementia (LTRC)
+
+NOTE: This takes ~5 minutes to run
+
+```{r fit-part2}
+cat("\nFitting Part 2 model (LTRC)...\n")
+cat("⚠ NOTE: This takes ~5 minutes to run\n\n")
+
+# Prepare data for Part 2 (dementia cases only)
+dem_mod_dat <- mod_dat %>%
+  filter(got_dementia == 1) %>%
+  mutate(
+    num_e4_1 = ifelse(num_e4 == 1, 1, 0),
+    num_e4_2 = ifelse(num_e4 == 2, 1, 0)
+  )
+
+cat("Part 2 sample size:", nrow(dem_mod_dat), "(dementia cases only)\n\n")
+
+tic()
+part_2_mod <- ltrc(
+  survival::Surv(mod_y, got_dementia) ~ t + years_education + is_female +
+    is_married + comorbidity + num_e4_1 + num_e4_2 + is_race_black + is_race_other,
+  data = dem_mod_dat,
+  trunc_time = dem_mod_dat$mod_l,
+  n_start = 10,
+  int_knots = 1
+)
+toc()
+
+# Get clean model
+part_2_mod_clean <- get_clean_model(part_2_mod)
+
+# Summary
+cat("\nPart 2 Model Coefficients:\n")
+print(part_2_mod_clean$parameters$beta)
+
+cat("\nPart 2 Model Standard Errors:\n")
+print(vcov(part_2_mod_clean) %>% diag() %>% sqrt())
+
+# Save model
+write_rds(part_2_mod_clean, fs::path(DATA_DIR, "nacc_pt_2_mod_sim.rds"))
+cat("\n✓ Part 2 model saved to:", fs::path(DATA_DIR, "nacc_pt_2_mod_sim.rds"), "\n")
+```
+
+## Bootstrap Variance Estimation
+
+Bootstrap resampling provides variance estimates for GHI predictions by repeatedly refitting the Part 2 model on resampled data. This is computationally intensive and best run on a server.
+
+### Overview
+
+The bootstrap procedure:
+1. **Part 1 model**: Fit once on full data (not resampled)
+2. **Part 2 model**: Resample dementia cases with replacement and refit
+3. **Predictions**: Generate GHI estimates across full covariate grid for each bootstrap sample
+4. **Variance**: Calculate empirical variance of GHI estimates across bootstrap samples
+
+**For this notebook**: We skip bootstrap computation and proceed with model-based standard errors only. Bootstrap results can be loaded if previously computed.
+
+### Check for Pre-computed Bootstrap Results
+
+```{r bootstrap-check}
+# Check if bootstrap results exist
+bs_dir <- "inst/sim_res/NACC_mod_bs_with_race"
+if (fs::dir_exists(bs_dir) && length(fs::dir_ls(bs_dir)) > 0) {
+  cat("✓ Bootstrap results found. Loading...\n")
+
+  bs_res <- data.frame()
+  for (f in fs::dir_ls(bs_dir)) {
+    tmp <- read_csv(f, show_col_types = FALSE)
+    bs_res <- bs_res %>% bind_rows(tmp)
+  }
+
+  cat("✓ Loaded", nrow(bs_res), "bootstrap samples\n")
+  cat("  Unique grid points:", n_distinct(bs_res %>% select(t, educ, is_female, is_married,
+                                                            has_comorbidity, e4_alleles_1,
+                                                            e4_alleles_2, is_race_black,
+                                                            is_race_other, l)), "\n")
+  BOOTSTRAP_AVAILABLE <- TRUE
+} else {
+  cat("ℹ No bootstrap results found.\n")
+  cat("  Proceeding without bootstrap variance estimates.\n")
+  cat("  Model-based standard errors will be used instead.\n\n")
+  cat("To compute bootstrap estimates, see server instructions below.\n")
+  BOOTSTRAP_AVAILABLE <- FALSE
+}
+```
+
+### Server-Based Bootstrap (Production Method)
+
+The production bootstrap used the following specification:
+- **Bootstrap iterations per file**: 6
+- **Total files**: 50 (yielding 300 total bootstrap samples)
+- **Resampling**: Dementia cases only (Part 2 model)
+- **Prediction grid**: 2,688 covariate combinations
+
+```markdown
+# Large-Scale Bootstrap on Server
+
+## Setup
+
+1. Prepare data file:
+   - Ensure `NACC_mod_dat.csv` is in working directory
+   - Should contain the full modeling dataset
+
+2. Upload scripts to server:
+   - `06_NACC_bootstrap_on_server.R` (main bootstrap code)
+   - `07_run_NACC_bootstrap_parallel.sh` (parallel execution script)
+
+3. Create output directory:
+   ```bash
+   mkdir -p NACC_mod_bs
+   ```
+
+4. Review prediction grid in `06_NACC_bootstrap_on_server.R`:
+   ```r
+   pred_grid <- list(
+     t = 5:25,                    # Age at death - 65 (21 values)
+     educ = 16,                   # Education fixed at 16 years
+     is_female = c(0, 1),         # Both sexes
+     is_married = c(0, 1),        # Married status
+     has_comorbidity = c(0, 1),   # Comorbidity
+     e4_alleles_1 = c(0, 1),      # One ε4 allele
+     e4_alleles_2 = c(0, 1),      # Two ε4 alleles
+     is_race_black = c(0, 1),     # Black race
+     is_race_other = 0,           # Other race fixed at 0
+     l = 1                        # Entry age - 65 fixed at 1
+   ) %>% expand.grid()
+   ```
+   Total: 21 × 1 × 2 × 2 × 2 × 2 × 2 × 2 × 1 = **2,688 grid points**
+
+## Running
+
+### Option A: Bash Script (Background Jobs)
+
+```bash
+cd inst/paper_code
+bash 07_run_NACC_bootstrap_parallel.sh
+wait  # Wait for all jobs to complete
+```
+
+### Option B: Manual Parallel Execution
+
+```bash
+# Run 50 files in parallel (FILE_NUM = 1 to 50)
+for i in {1..50}; do
+  Rscript 06_NACC_bootstrap_on_server.R $i > bs_out_$i.txt 2>&1 &
+done
+wait
+```
+
+## Expected Runtime
+
+- **Per file** (6 bootstrap iterations × 2,688 predictions): 30-60 minutes
+- **Total (50 parallel jobs)**: 30-60 minutes wall time
+- **Total (sequential)**: 25-50 hours
+
+## Output
+
+- 50 `.csv` files in `NACC_mod_bs/`
+- Each file: `file_{FILE_NUM}.csv`
+- Each contains 6 bootstrap iterations × 2,688 grid points = 16,128 rows
+- Total: 50 × 16,128 = 806,400 bootstrap predictions
+
+## Post-Processing
+
+After bootstrap completes:
+
+1. **Combine files**: All files can be loaded together (as done in bootstrap-check chunk above)
+
+2. **Calculate variance**: Group by grid point and compute empirical variance
+   ```r
+   bs_variance <- bs_res %>%
+     group_by(t, educ, is_female, is_married, has_comorbidity,
+              e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l) %>%
+     summarize(
+       mean_ghi = mean(ghi_estimate),
+       var_ghi = var(ghi_estimate),
+       sd_ghi = sd(ghi_estimate),
+       .groups = "drop"
+     )
+   ```
+
+3. **Use in figures**: Bootstrap SE provides confidence bands for GHI plots
+```
+
+---
+
+# 4. Model Analysis
+
+This section generates **Table 2** (coefficient estimates with confidence intervals) and **Figures 1-2** from the paper.
+
+## Table 2: Model Coefficients
+
+```{r table2}
+# Load fitted models if not already in memory
+if (!exists("part_1_mod")) {
+  part_1_mod <- read_rds(fs::path(DATA_DIR, "nacc_pt_1_mod.rds"))
+}
+if (!exists("part_2_mod_clean")) {
+  part_2_mod_clean <- read_rds(fs::path(DATA_DIR, "nacc_pt_2_mod.rds"))
+}
+
+# Part 2 coefficients
+omegas <- part_2_mod_clean$parameters$beta
+sds_omega <- vcov(part_2_mod_clean) %>% diag() %>% sqrt()
+
+# Part 1 coefficients (excluding intercept)
+betas <- part_1_mod$coefficients[-1]
+sds_beta <- vcov(part_1_mod) %>% diag() %>% sqrt() %>% `[`(-1)
+
+# Create coefficient table
+coef_table <- data.frame(
+  Covariate = c("t (time since age 65)", "Years of education", "Female",
+                "Married", "≥1 Comorbidity", "1 ε4 allele", "2 ε4 alleles",
+                "Black race", "Other race", "l (left truncation)"),
+  Part1_Est = round(betas, 3),
+  Part1_CI = paste0("(", round(betas - 1.96 * sds_beta, 3), ", ",
+                    round(betas + 1.96 * sds_beta, 3), ")"),
+  Part1_P = format.pval(2 * pnorm(-abs(betas / sds_beta)), digits = 3, eps = 0.001),
+  Part2_Est = c(round(omegas, 3), "—"),
+  Part2_CI = c(paste0("(", round(omegas - 1.96 * sds_omega, 3), ", ",
+                      round(omegas + 1.96 * sds_omega, 3), ")"), "—"),
+  Part2_P = c(format.pval(2 * pnorm(-abs(omegas / sds_omega)), digits = 3, eps = 0.001), "—")
+)
+
+knitr::kable(coef_table,
+             caption = "Table 2: Coefficient Estimates for Two-Part Model",
+             col.names = c("Covariate", "Estimate", "95% CI", "P-value",
+                          "Estimate", "95% CI", "P-value"),
+             align = c("l", "r", "l", "r", "r", "l", "r"))
+```
+
+## Prediction Function
+
+Define the function to compute GHI predictions:
+
+```{r prediction-function}
+# Update dem_mod_dat with full model data
+mod_dat <- mod_dat %>%
+  mutate(
+    num_e4_1 = ifelse(num_e4 == 1, 1, 0),
+    num_e4_2 = ifelse(num_e4 == 2, 1, 0)
+  )
+dem_mod_dat <- mod_dat %>% filter(got_dementia == 1)
+
+predict_ghi <- function(mod1, mod2, t, educ, is_female, is_married,
+                       has_comorbidity, e4_alleles_1, e4_alleles_2,
+                       is_race_black, is_race_other, l) {
+
+  # Part 1: Probability of dementia
+  lp_mu <- sum(mod1$coefficients[-1] *
+                 c(t, educ, is_female, is_married, has_comorbidity,
+                   e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l))
+  mu <- exp(lp_mu) / (1 + exp(lp_mu))
+
+  var_mu <- (mu * (1 - mu))^2 *
+    c(1, t, educ, is_female, is_married, has_comorbidity,
+      e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l) %*%
+    vcov(mod1) %*%
+    c(1, t, educ, is_female, is_married, has_comorbidity,
+      e4_alleles_1, e4_alleles_2, is_race_black, is_race_other, l)
+
+  # Part 2: Expected timing given dementia
+  lp_y <- sum(mod2$parameters$beta *
+                c(t, educ, is_female, is_married, has_comorbidity,
+                  e4_alleles_1, e4_alleles_2, is_race_black, is_race_other))
+
+  sd_lp_y <- c(t, educ, is_female, is_married, has_comorbidity,
+               e4_alleles_1, e4_alleles_2, is_race_black, is_race_other) %*%
+    vcov(mod2) %*%
+    c(t, educ, is_female, is_married, has_comorbidity,
+      e4_alleles_1, e4_alleles_2, is_race_black, is_race_other)
+
+  # Kaplan-Meier integration for E[Y | dementia]
+  mod_l <- log((l/t) / (1 - (l/t)))
+  lower_bound <- mod_l - lp_y
+
+  tau <- dem_mod_dat %>%
+    mutate(l_resid_scale = mod_l - lp_y) %>%
+    pull(l_resid_scale)
+
+  km_df <- data.frame(
+    epsilon = mod2$data$residuals,
+    tau = tau,
+    delta = 1
+  ) %>%
+    mutate(
+      g_of_e = exp(lp_y + epsilon) / (1 + exp(lp_y + epsilon)),
+      g_of_t = exp(lp_y + tau) / (1 + exp(lp_y + tau))
+    ) %>%
+    filter(epsilon > lower_bound, g_of_e > g_of_t)
+
+  if (nrow(km_df) < 3) return(data.frame())
+
+  km_fit <- tryCatch({
+    survfit(Surv(time = g_of_t, time2 = g_of_e, event = delta) ~ 1, data = km_df)
+  }, error = function(e) return(NULL))
+
+  if (is.null(km_fit)) return(data.frame())
+
+  km_times <- c(0, km_fit$time)
+  km_surv <- c(1, km_fit$surv)
+  km_estimate <- sum(km_surv[-length(km_surv)] * diff(km_times))
+
+  # GHI = E[min(T, S)] = (1-mu) + mu * E[Y | dementia]
+  ghi_estimate <- (1 - mu) + mu * km_estimate
+
+  data.frame(
+    t = t, educ = educ, is_female = is_female, is_married = is_married,
+    has_comorbidity = has_comorbidity, e4_alleles_1 = e4_alleles_1,
+    e4_alleles_2 = e4_alleles_2, is_race_black = is_race_black,
+    is_race_other = is_race_other, l = l,
+    lp_mu = lp_mu, mu = mu, var_mu = var_mu,
+    lp_y = lp_y, sd_lp_y = sd_lp_y,
+    expected_y = km_estimate,
+    ghi_estimate = ghi_estimate
+  )
+}
+```
+
+## Generate Predictions
+
+```{r generate-predictions}
+cat("Generating predictions across covariate grid...\n")
+
+pred_grid <- expand.grid(
+  t = c(0.5, 1:25),
+  educ = 16,
+  is_female = c(0, 1),
+  is_married = c(0, 1),
+  has_comorbidity = c(0, 1),
+  e4_alleles_1 = c(0, 1),
+  e4_alleles_2 = c(0, 1),
+  is_race_black = c(0, 1),
+  is_race_other = c(0,1),
+  l = 1
+)
+
+# Remove invalid combinations (can't have both e4 alleles)
+pred_grid <- pred_grid %>%
+  filter(!(e4_alleles_1 == 1 & e4_alleles_2 == 1))
+
+cat("Prediction grid size:", nrow(pred_grid), "combinations\n")
+cat("Computing predictions (this may take 1-2 minutes)...\n\n")
+
+tic()
+res <- pred_grid %>%
+  pmap_dfr(function(...) {
+    args <- list(...)
+    predict_ghi(
+      part_1_mod, part_2_mod_clean,
+      t = args$t, educ = args$educ, is_female = args$is_female,
+      is_married = args$is_married, has_comorbidity = args$has_comorbidity,
+      e4_alleles_1 = args$e4_alleles_1, e4_alleles_2 = args$e4_alleles_2,
+      is_race_black = args$is_race_black, is_race_other = args$is_race_other,
+      l = args$l
+    )
+  })
+toc()
+
+cat("\n✓ Generated", nrow(res), "predictions\n")
+```
+
+## Figures 1 and 2: GHI by Age, Race, Sex, Marital Status, Comorbidity, and APOE Status
+
+
+```{r}
+fig1 <- res %>%
+  mutate(
+    Race = case_when(
+      is_race_black == 1 ~ "Race: Black",
+      is_race_other == 1 ~ "Race: Other",
+      TRUE ~ "Race: White"
+    ),
+    Race = factor(Race, levels = c("Race: White", "Race: Black", "Race: Other")),
+    married_str = ifelse(is_married == 1, "Married", "Unmarried"),
+    sex_str = ifelse(is_female == 1, "Female", "Male"),
+    comorbidity_str = ifelse(has_comorbidity == 1, "with Comorbidity", "without Comorbidity"),
+    Group = paste0(married_str, " ", sex_str, "\n", comorbidity_str)
+  ) %>%
+  filter(is_female == 0) %>%
+  filter(educ == 16) %>%
+  filter(!(e4_alleles_2 == 1 & e4_alleles_1 == 1)) %>%
+  filter(!(is_race_black == 1 & is_race_other == 1)) %>%
+  mutate(
+    num_e4 = case_when(
+      e4_alleles_2 == 1 ~ 2,
+      e4_alleles_1 == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    Comorbidity = ifelse(has_comorbidity == 1, "Yes", "No"),
+    Sex = ifelse(is_female == 1, "Female", "Male")#,
+    # lower = ghi_estimate - 2 * sd_ghi,
+    # upper = ghi_estimate + 2 * sd_ghi
+  ) %>%
+  ggplot() +
+  aes(x = t + 65, y = ghi_estimate, color = as.factor(num_e4), fill = as.factor(num_e4)) +
+  # {if(all(!is.na(res_w_var$sd_ghi))) geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA)} +
+  geom_line(aes(lty = as.factor(num_e4)), size = 1) +
+  facet_grid(Group ~ Race, labeller = "label_value") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    text = element_text(family = "Times"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10),
+    axis.text = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  labs(x = "Age at Death", y = "Predicted GHI", color = "Number of e4 Alleles", fill = "Number of e4 Alleles", lty = "Number of e4 Alleles") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  xlim(c(65, 90))
+
+print(fig1)
+      # Save figure
+ggsave(fs::path(RESULTS_DIR, "figure1.png"),
+       fig1, width = 12, height = 7, dpi = 300)
+
+fig2 <- res %>%
+  mutate(
+    Race = case_when(
+      is_race_black == 1 ~ "Race: Black",
+      is_race_other == 1 ~ "Race: Other",
+      TRUE ~ "Race: White"
+    ),
+    Race = factor(Race, levels = c("Race: White", "Race: Black", "Race: Other")),
+    married_str = ifelse(is_married == 1, "Married", "Unmarried"),
+    sex_str = ifelse(is_female == 1, "Female", "Male"),
+    comorbidity_str = ifelse(has_comorbidity == 1, "with Comorbidity", "without Comorbidity"),
+    Group = paste0(married_str, " ", sex_str, "\n", comorbidity_str)
+  ) %>%
+  filter(is_female == 1) %>%
+  filter(educ == 16) %>%
+  filter(!(e4_alleles_2 == 1 & e4_alleles_1 == 1)) %>%
+  filter(!(is_race_black == 1 & is_race_other == 1)) %>%
+  mutate(
+    num_e4 = case_when(
+      e4_alleles_2 == 1 ~ 2,
+      e4_alleles_1 == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    Comorbidity = ifelse(has_comorbidity == 1, "Yes", "No"),
+    Sex = ifelse(is_female == 1, "Female", "Male")#,
+    # lower = ghi_estimate - 2 * sd_ghi,
+    # upper = ghi_estimate + 2 * sd_ghi
+  ) %>%
+  ggplot() +
+  aes(x = t + 65, y = ghi_estimate, color = as.factor(num_e4), fill = as.factor(num_e4)) +
+  # {if(all(!is.na(res_w_var$sd_ghi))) geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA)} +
+  geom_line(aes(lty = as.factor(num_e4)), size = 1) +
+  facet_grid(Group ~ Race, labeller = "label_value") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    text = element_text(family = "Times"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10),
+    axis.text = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  labs(x = "Age at Death", y = "Predicted GHI", color = "Number of e4 Alleles", fill = "Number of e4 Alleles", lty = "Number of e4 Alleles") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  xlim(c(65, 90))
+
+print(fig2)
+      # Save figure
+ggsave(fs::path(RESULTS_DIR, "figure2.png"),
+       fig2, width = 12, height = 7, dpi = 300)
+```
+
+---
+
+# 5. Model Checking
+
+Comprehensive diagnostics for both parts of the model.
+
+## Part 1 Diagnostics {.tabset}
+
+### Surrogate Residuals
+
+```{r part1-surrogate-residuals}
+cat("Computing surrogate residuals for Part 1 model...\n")
+
+# Refit Part 1 with y = TRUE to access response
+part_1_mod_check <- glm(
+  got_dementia ~ t + years_education + is_female + is_married + comorbidity +
+    as.factor(num_e4) + is_race_black + is_race_other + l,
+  data = mod_dat,
+  family = "binomial",
+  y = TRUE
+)
+
+# Surrogate residuals function
+surrogate_residuals_logistic <- function(model, nsim = 1, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  y <- model$y
+  if (is.null(y)) stop("Model must be fit with y = TRUE")
+
+  p <- fitted(model)
+  n <- length(y)
+  res <- matrix(NA_real_, nrow = n, ncol = nsim)
+
+  for (s in seq_len(nsim)) {
+    U <- numeric(n)
+    for (i in seq_len(n)) {
+      if (y[i] == 0) {
+        U[i] <- runif(1, min = 0, max = 1 - p[i])
+      } else {
+        U[i] <- runif(1, min = 1 - p[i], max = 1)
+      }
+    }
+    res[, s] <- qnorm(U)
+  }
+
+  if (nsim == 1) drop(res) else res
+}
+
+set.seed(26339)
+r <- surrogate_residuals_logistic(part_1_mod_check, seed = 26339)
+R <- surrogate_residuals_logistic(part_1_mod_check, nsim = 100, seed = 26339)
+
+cat("✓ Computed surrogate residuals\n")
+```
+
+### QQ Plot
+
+```{r part1-qq, fig.width=8, fig.height=6}
+# QQ plot envelope
+qq_data <- apply(R, 2, sort)
+env_bottom <- apply(qq_data, 1, min)
+env_top <- apply(qq_data, 1, max)
+
+qq_plot <- ggplot() +
+  aes(sample = r) +
+  geom_ribbon(
+    aes(x = qnorm(ppoints(nrow(R))), ymin = env_bottom, ymax = env_top),
+    fill = "lightblue",
+    alpha = 0.5
+  ) +
+  geom_qq(alpha = 0.3, size = 1) +
+  geom_qq_line(color = "red", lty = "dashed", size = 1) +
+  labs(
+    title = "Part 1: QQ Plot of Surrogate Residuals",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  theme_bw(base_size = 14)
+
+print(qq_plot)
+```
+
+### Hosmer-Lemeshow Test
+
+```{r part1-hosmer-lemeshow}
+# Hosmer-Lemeshow goodness of fit test
+hl_test <- hoslem.test(part_1_mod_check$y, fitted(part_1_mod_check), g = 10)
+
+cat("Hosmer-Lemeshow Test:\n")
+cat("  Chi-squared:", round(hl_test$statistic, 3), "\n")
+cat("  df:", hl_test$parameter, "\n")
+cat("  p-value:", format.pval(hl_test$p.value, digits = 3), "\n\n")
+
+if (hl_test$p.value > 0.05) {
+  cat("✓ Good fit (fail to reject null hypothesis of good calibration)\n")
+} else {
+  cat("⚠ Potential calibration issues (reject null hypothesis)\n")
+}
+```
+
+### Calibration Plot
+
+```{r part1-calibration, fig.width=8, fig.height=6}
+hl <- hoslem.test(
+  x = mod_dat$got_dementia,
+  y = fitted(part_1_mod),
+  g = 10
+)
+
+hl_data <- data.frame(
+  observed = hl$observed[, 2],
+  expected = hl$expected[, 2],
+  group = seq_len(nrow(hl$observed))
+)
+
+calib <- mod_dat %>%
+  mutate(
+    p_hat = fitted(part_1_mod),
+    group = ntile(p_hat, 10)
+  ) %>%
+  group_by(group) %>%
+  summarize(
+    mean_p = mean(p_hat),
+    obs_rate = mean(got_dementia),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    se = sqrt(obs_rate * (1 - obs_rate) / n),
+    lower = obs_rate - 1.96 * se,
+    upper = obs_rate + 1.96 * se
+  )
+
+cal_plot <- calib %>%
+  ggplot() +
+  geom_point(
+    aes(x = mean_p, y = obs_rate),
+    size = 2
+  ) +
+  geom_segment(
+    aes(x = mean_p, xend = mean_p, y = lower, yend = upper)
+  ) +
+  geom_segment(
+    aes(x = mean_p - 0.005, xend = mean_p + 0.005, y = lower, yend = lower)
+  ) +
+  geom_segment(
+    aes(x = mean_p - 0.005, xend = mean_p + 0.005, y = upper, yend = upper)
+  ) +
+  geom_abline(slope = 1, intercept = 0, color = "red", lty = "dashed") +
+  xlab("Mean Predicted Probability") +
+  ylab("Observed Event Rate") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    text = element_text(family = "Times"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    axis.title = element_text(size = 18)
+  )
+
+print(cal_plot)
+```
+
+### VIF (Multicollinearity)
+
+```{r part1-vif}
+# Variance Inflation Factors
+vif_values <- car::vif(part_1_mod_check)
+
+cat("Variance Inflation Factors (VIF):\n")
+print(round(vif_values, 2))
+
+max_vif <- max(vif_values)
+cat("\nMax VIF:", round(max_vif, 2), "\n")
+
+if (max_vif < 5) {
+  cat("✓ No multicollinearity concerns (all VIF < 5)\n")
+} else if (max_vif < 10) {
+  cat("⚠ Moderate multicollinearity (some VIF between 5-10)\n")
+} else {
+  cat("⚠ Severe multicollinearity (some VIF > 10)\n")
+}
+```
+
+### Cook's Distance
+
+```{r part1-cooks, fig.width=10, fig.height=6}
+# Cook's distance
+cooks_d <- cooks.distance(part_1_mod_check)
+
+# Cutoff: 4 / n
+cutoff <- 4 / nrow(mod_dat)
+influential <- which(cooks_d > cutoff)
+
+cat("Cook's Distance Analysis:\n")
+cat("  Cutoff (4/n):", round(cutoff, 6), "\n")
+cat("  Influential points:", length(influential), "of", nrow(mod_dat), "\n")
+
+# Plot
+cooks_plot <- ggplot(data.frame(index = 1:length(cooks_d), cooks = cooks_d),
+                     aes(x = index, y = cooks)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = cutoff, color = "red", lty = "dashed") +
+  labs(
+    title = "Part 1: Cook's Distance",
+    subtitle = paste0(length(influential), " influential observations (red line = 4/n cutoff)"),
+    x = "Observation Index",
+    y = "Cook's Distance"
+  ) +
+  theme_bw(base_size = 14)
+
+print(cooks_plot)
+
+# Refit without influential points
+if (length(influential) > 0 && length(influential) < nrow(mod_dat) * 0.1) {
+  cat("\nRefitting model without influential points...\n")
+  mod_dat_no_influential <- mod_dat[-influential, ]
+
+  part_1_mod_robust <- glm(
+    got_dementia ~ t + years_education + is_female + is_married + comorbidity +
+      as.factor(num_e4) + is_race_black + is_race_other + l,
+    data = mod_dat_no_influential,
+    family = "binomial"
+  )
+
+  # Compare coefficients
+  coef_comparison <- data.frame(
+    Original = coef(part_1_mod_check),
+    Robust = coef(part_1_mod_robust),
+    Difference = coef(part_1_mod_robust) - coef(part_1_mod_check),
+    Pct_Change = (coef(part_1_mod_robust) - coef(part_1_mod_check)) / coef(part_1_mod_check) * 100
+  )
+
+  cat("\nCoefficient comparison (original vs. robust):\n")
+  print(round(coef_comparison, 4))
+
+  max_pct_change <- max(abs(coef_comparison$Pct_Change), na.rm = TRUE)
+  if (max_pct_change < 10) {
+    cat("\n✓ Robust model similar (max change < 10%)\n")
+  } else {
+    cat("\n⚠ Substantial changes detected (max change > 10%)\n")
+  }
+}
+```
+
+Note that while there are some substantial changes, they occur in groups that had a small number of individuals to begin with. Further, the key here is to assess if outliers are impacting our main conclusions for the APOE covariates, which they are not since the robust estimates are in the same direction, and actually have a larger magnitude when fit.
+
+### Linearity Check
+
+```{r part1-linearity, fig.width=12, fig.height=8}
+# Check linearity assumption for continuous predictors
+eta <- predict(part_1_mod_check, type = "link")
+
+linearity_plots <- list()
+
+# t
+p1 <- ggplot(data.frame(t = mod_dat$t, r = r), aes(x = t, y = r)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+  labs(title = "Residuals vs. t", x = "t", y = "Surrogate Residual") +
+  theme_bw()
+
+# Education
+p2 <- ggplot(data.frame(educ = mod_dat$years_education, r = r),
+             aes(x = educ, y = r)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+  labs(title = "Residuals vs. Education", x = "Years of Education",
+       y = "Surrogate Residual") +
+  theme_bw()
+
+# l
+p3 <- ggplot(data.frame(l = mod_dat$l, r = r), aes(x = l, y = r)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+  labs(title = "Residuals vs. l", x = "l", y = "Surrogate Residual") +
+  theme_bw()
+
+# Linear predictor
+p4 <- ggplot(data.frame(eta = eta, r = r), aes(x = eta, y = r)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+  labs(title = "Residuals vs. Linear Predictor", x = "Linear Predictor",
+       y = "Surrogate Residual") +
+  theme_bw()
+
+# Combine plots
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+```
+
+### Likelihood Ratio Test (Splines)
+
+```{r part1-lrt-splines}
+cat("Testing spline alternatives for continuous predictors...\n\n")
+
+# Test splines for t
+part_1_mod_t_spline <- glm(
+  got_dementia ~ ns(t, df = 3) + years_education + is_female + is_married +
+    comorbidity + as.factor(num_e4) + is_race_black + is_race_other + l,
+  data = mod_dat,
+  family = "binomial"
+)
+
+lrt_t <- anova(part_1_mod_check, part_1_mod_t_spline, test = "Chisq")
+cat("LRT for t (linear vs. spline):\n")
+print(lrt_t)
+
+# Test splines for education
+part_1_mod_educ_spline <- glm(
+  got_dementia ~ t + ns(years_education, df = 3) + is_female + is_married +
+    comorbidity + as.factor(num_e4) + is_race_black + is_race_other + l,
+  data = mod_dat,
+  family = "binomial"
+)
+
+lrt_educ <- anova(part_1_mod_check, part_1_mod_educ_spline, test = "Chisq")
+cat("\nLRT for education (linear vs. spline):\n")
+print(lrt_educ)
+
+# Test splines for l
+part_1_mod_l_spline <- glm(
+  got_dementia ~ t + years_education + is_female + is_married + comorbidity +
+    as.factor(num_e4) + is_race_black + is_race_other + ns(l, df = 3),
+  data = mod_dat,
+  family = "binomial"
+)
+
+lrt_l <- anova(part_1_mod_check, part_1_mod_l_spline, test = "Chisq")
+cat("\nLRT for l (linear vs. spline):\n")
+print(lrt_l)
+
+cat("\n")
+if (lrt_t$`Pr(>Chi)`[2] > 0.05 && lrt_educ$`Pr(>Chi)`[2] > 0.05 &&
+    lrt_l$`Pr(>Chi)`[2] > 0.05) {
+  cat("✓ Linear specifications adequate for all continuous predictors\n")
+} else {
+  cat("⚠ Some non-linear relationships detected - consider splines\n")
+}
+```
+
+## Part 2 Diagnostics {.tabset}
+
+### Partial Martingale Residual Plots
+
+```{r}
+X <- model.matrix(~ . - 1, data = as.data.frame(part_2_mod_clean$data$predictors))
+beta <- part_2_mod_clean$parameters$beta
+resid <- as.numeric(part_2_mod_clean$data$residuals)
+
+partial_resid_plot <- function(j, var_name) {
+
+  if (var_name == "Age at Death") add_val <- 65
+  else add_val <- 0
+  pr <- resid + X[, j] * beta[j]
+
+  plot_dat <- data.frame(
+    x = X[, j],
+    pr = pr
+  )
+
+  ggplot(plot_dat, aes(x = x + add_val, y = pr)) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "loess", se = FALSE, color = "blue") +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "red") +
+    labs(
+      x = var_name,
+      y = "Partial residual"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      text = element_text(family = "Times"),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 15),
+      axis.text = element_text(size = 15),
+      plot.title = element_text(hjust = 0.5, size = 20),
+      axis.title = element_text(size = 18)
+    )
+}
+
+# Example
+partial_resid_plot(j = 1, var_name = "Age at Death")
+partial_resid_plot(j = 2, var_name = "Years of Education")
+```
+
+
+### Cumulative Martingale Processes
+
+```{r part2-cumulative-mart, fig.width=10, fig.height=6}
+cum_mart_resid_plot <- function(mart, x, x_label = "Age at Death") {
+  n <- length(mart)
+
+  # jitter if the variable is discrete
+  if (length(x) != length(unique(x))) {
+    x <- x + rnorm(length(x), 0, 0.1)
+  }
+
+  ord <- order(x)
+  x_ord <- x[ord]
+  m_ord <- mart[ord]
+
+  R_obs <- cumsum(m_ord) / sqrt(n)
+
+  B <- 1000
+  R_sim <- matrix(NA_real_, nrow = n, ncol = B)
+
+  for (b in seq_len(B)) {
+    G <- rnorm(n)
+    M_star <- m_ord * G
+    R_sim[, b] <- cumsum(M_star) / sqrt(n)
+  }
+
+  lower <- apply(R_sim, 1, quantile, probs = 0.025)
+  upper <- apply(R_sim, 1, quantile, probs = 0.975)
+
+  if (x_label == "Age at Death") plot_x <- x_ord + 65
+  else plot_x <- x_ord
+
+  p <- ggplot() +
+    geom_ribbon(
+      aes(x = plot_x, ymin = lower, ymax = upper),
+      fill = "blue",
+      alpha = 0.25
+    ) +
+    geom_line(
+      aes(x = plot_x, y = R_obs)
+    ) +
+    geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+    xlab(x_label) +
+    ylab("Cumulative Martingale Residual") +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      text = element_text(family = "Times"),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 15),
+      axis.text = element_text(size = 15),
+      axis.title = element_text(size = 18)
+    )
+
+  return(p)
+}
+
+martingale_resids <- part_2_mod_clean$data$martingale_residuals
+cum_mart_resid_plot(martingale_resids, dem_mod_dat$t, x_label = "Age at Death")
+cum_mart_resid_plot(martingale_resids, dem_mod_dat$years_education, x_label = "Years of Education")
+
+```
+
+### Influence Diagnostics
+
+NOTE: This will take about 5 minutes to run
+
+```{r part2-influence}
+# Identify high-leverage points and outliers
+# Note: This is approximate - full dfbeta analysis requires custom implementation
+
+cat("Part 2 Influence Diagnostics:\n\n")
+
+# Leverage (hat values) - approximated using residuals
+mart_resid <- part_2_mod_clean$data$martingale_residuals
+leverage_approx <- abs(mart_resid) / sd(mart_resid)
+high_leverage <- which(leverage_approx > 2.5)
+
+cat("High leverage points (|standardized residual| > 2.5):", length(high_leverage), "\n")
+cat("Proportion:", round(length(high_leverage) / length(mart_resid) * 100, 2), "%\n")
+
+if (length(high_leverage) > 0 && length(high_leverage) < nrow(dem_mod_dat) * 0.1) {
+  cat("\nRefitting model without high-leverage points...\n")
+
+  dem_mod_dat_robust <- dem_mod_dat[-high_leverage, ]
+
+  tic()
+  part_2_mod_robust <- ltrc(
+    survival::Surv(mod_y, got_dementia) ~ t + years_education + is_female +
+      is_married + comorbidity + num_e4_1 + num_e4_2 + is_race_black + is_race_other,
+    data = dem_mod_dat_robust,
+    trunc_time = dem_mod_dat_robust$mod_l,
+    n_start = 10,
+    int_knots = 1
+  )
+  toc()
+
+  part_2_mod_robust_clean <- get_clean_model(part_2_mod_robust)
+
+  # Compare coefficients
+  coef_comparison_p2 <- data.frame(
+    Original = part_2_mod_clean$parameters$beta,
+    Robust = part_2_mod_robust_clean$parameters$beta,
+    Difference = part_2_mod_robust_clean$parameters$beta - part_2_mod_clean$parameters$beta,
+    Pct_Change = (part_2_mod_robust_clean$parameters$beta - part_2_mod_clean$parameters$beta) /
+                 part_2_mod_clean$parameters$beta * 100
+  )
+
+  cat("\nCoefficient comparison (original vs. robust):\n")
+  print(round(coef_comparison_p2, 4))
+
+  max_pct_change <- max(abs(coef_comparison_p2$Pct_Change))
+  if (max_pct_change < 10) {
+    cat("\n✓ Robust model similar (max change < 10%)\n")
+  } else {
+    cat("\n⚠ Substantial changes detected (max change > 10%)\n")
+  }
+} else {
+  cat("\n⚠ Too many or too few high-leverage points for robust comparison\n")
+}
+```
+
+These results are similar to what we had in this same analysis for the part 1 model. Some large changes but not relative to the standard error of the estimate. And the conclusion remains the same.
+
+### Comparison to Parametric Model
+
+```{r part2-parametric, eval=FALSE}
+cat("Comparing semiparametric LTRC to parametric truncated regression...\n")
+
+resids <- as.numeric(part_2_mod_clean$data$residuals)
+# need to subtract the linear predictor to get the truncation time on the same scale as the residuals
+trunc_points <- dem_mod_dat$mod_l - part_2_mod_clean$data$fitted_response
+sum(trunc_points > resids) # sanity check
+
+# Estimate parameters assuming truncated normal (MLE under truncation)
+# Using method of moments as starting point, then refining
+resid_mean_init <- mean(resids)
+resid_sd_init <- sd(resids)
+
+# Fit truncated normal via maximum likelihood
+neg_loglik <- function(par, t, l) {
+  mu <- par[1]
+  sigma <- exp(par[2])
+
+  z_t <- (t - mu) / sigma
+  z_l <- (l - mu) / sigma
+
+  ll <- sum(
+    dnorm(z_t, log = TRUE) - log(sigma) -
+      pnorm(z_l, lower.tail = FALSE, log.p = TRUE)
+  )
+
+  return(-ll)
+}
+
+# Optimize
+fit_trunc <- optim(
+  par = c(resid_mean_init, log(resid_sd_init)),
+  fn = neg_loglik,
+  t = resids,
+  l = trunc_points,
+  method = "BFGS"
+)
+
+mu_hat <- fit_trunc$par[1]
+sigma_hat <- exp(fit_trunc$par[2])
+
+cat("Fitted truncated normal parameters:\n")
+cat("  mu =", round(mu_hat, 4), "\n")
+cat("  sigma =", round(sigma_hat, 4), "\n\n")
+
+# Transform residuals to uniform via truncated normal CDF, then to standard normal
+# If residuals truly follow TruncNorm(mu, sigma, a=l_i), then z should be N(0,1)
+u <- (pnorm((resids - mu_hat) / sigma_hat) - pnorm((trunc_points - mu_hat) / sigma_hat)) /
+  (1 - pnorm((trunc_points - mu_hat) / sigma_hat))
+z <- qnorm(u)
+
+# Remove any infinite/NA values
+z_clean <- z[is.finite(z)]
+
+# Create QQ plot data for ggplot
+n <- length(z_clean)
+theoretical_quantiles <- qnorm(ppoints(n))
+observed_sorted <- sort(z_clean)
+
+qq_df <- data.frame(
+  theoretical = theoretical_quantiles,
+  observed = observed_sorted
+)
+
+# QQ Plot with ggplot
+qq_trunc_plot <- ggplot(qq_df) +
+  geom_point(aes(y = theoretical, x = observed), alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", lty = "dashed", linewidth = 1) +
+  labs(
+    title = "Part 2: QQ Plot of Residuals vs. Truncated Normal",
+    subtitle = "If residuals follow truncated normal, points should lie on the line",
+    y = "Theoretical Quantiles (Standard Normal)",
+    x = "Transformed Residuals"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    text = element_text(family = "Times"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    axis.title = element_text(size = 18),
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12)
+  )
+
+print(qq_trunc_plot)
+```
+
+---
+
+# 6. Sensitivity Analyses
+
+## 6.1 ADRC Sub-Analysis {.tabset}
+
+### Included vs. Excluded Subjects
+
+```{r adrc-comparison}
+cat("ADRC Comparison Analysis\n")
+cat("========================\n\n")
+
+cat("⚠ Note: With simulated data, subject-level characteristics are artificial\n")
+cat("  For real data, compare demographics of included vs. excluded subjects\n\n")
+
+# With real data, would compare:
+# - Age distributions
+# - Sex ratios
+# - Education levels
+# - Dementia rates
+# - Between those in the analysis vs. those excluded
+
+cat("Analysis to perform with real NACC data:\n")
+cat("  1. Identify exclusion reasons (missing data, age < 65, etc.)\n")
+cat("  2. Compare demographics: age, sex, education, race, APOE\n")
+cat("  3. Assess potential selection bias\n")
+cat("  4. Consider sensitivity to exclusion criteria\n")
+```
+
+### Random Effects Models
+
+Fit mixed-effects models with random intercepts and slopes by ADRC:
+
+```{r adrc-random-effects}
+cat("Fitting random effects models by ADRC...\n\n")
+
+# Load additional packages
+library(statmod)
+library(truncnorm)
+library(TMB)
+
+# Part 1: Random intercept logistic regression
+cat("Part 1: Random intercept logistic model\n")
+cat("---------------------------------------\n")
+tic()
+part_1_re <- glmer(
+  got_dementia ~ t + years_education + is_female + is_married + comorbidity +
+    as.factor(num_e4) + is_race_black + is_race_other + l + (1 | adc),
+  data = mod_dat,
+  family = binomial
+)
+# This sometimes errors out, just try it a couple of times
+toc()
+
+summary(part_1_re)
+
+# Extract fixed effects and random effects variance
+fe_p1 <- fixef(part_1_re)
+se_p1 <- sqrt(diag(vcov(part_1_re)))
+re_var_p1 <- as.data.frame(VarCorr(part_1_re))
+
+cat("\n\nPart 1 Random Effects Variance:\n")
+print(re_var_p1)
+
+# Part 2: Truncated regression with random effects
+cat("\n\nPart 2: Truncated regression with random effects\n")
+cat("------------------------------------------------\n")
+cat("⚠ Note: This uses TMB for random slopes - may take 2-3 minutes\n\n")
+
+# First, fit basic truncated regression (no random effects) as baseline
+library(truncreg)
+fit_basic <- truncreg(
+  mod_y ~ t + years_education + is_female + is_married + comorbidity +
+    num_e4_1 + num_e4_2 + is_race_black + is_race_other,
+  point = dem_mod_dat$mod_l,
+  data = dem_mod_dat,
+  direction = "left"
+)
+
+cat("Basic truncated regression (no random effects):\n")
+print(summary(fit_basic))
+
+# Now fit truncated LMM with random intercept and slopes using TMB
+cat("\n\nFitting truncated LMM with random effects using TMB...\n")
+
+# Compile TMB model
+cpp_file <- "model/truncated_lmm.cpp"
+if (file.exists(cpp_file)) {
+  cat("Compiling TMB model...\n")
+  TMB::compile(cpp_file)
+  dyn.load(dynlib("model/truncated_lmm"))
+
+  # Construct fixed and random effects design matrices
+  X <- model.matrix(~ t + years_education + is_female + is_married +
+                      comorbidity + num_e4_1 + num_e4_2 +
+                      is_race_black + is_race_other, data = dem_mod_dat)
+
+  # Random effects: intercept + selected covariates
+  Z <- model.matrix(~ is_female + is_married + comorbidity +
+                      num_e4_1 + num_e4_2 + is_race_black + is_race_other,
+                    data = dem_mod_dat)
+
+  # Add random intercept as first column
+  Z <- cbind(1, Z)
+
+  # Map subjects to 0-based index for TMB
+  id <- as.integer(as.factor(dem_mod_dat$adc)) - 1
+
+  # Prepare data for TMB
+  data <- list(
+    y = dem_mod_dat$mod_y,
+    X = X,
+    Z = Z,
+    id = id,
+    L = dem_mod_dat$mod_l
+  )
+
+  # Starting values
+  p <- ncol(X)
+  q <- ncol(Z)
+  n_subj <- length(unique(id))
+
+  parameters <- list(
+    beta = rep(0, p),
+    log_sigma = 0,
+    b_raw = rep(0, n_subj * q),
+    log_sd_b = rep(0, q)
+  )
+
+  # Create objective function
+  tic()
+  obj <- MakeADFun(data, parameters, random = "b_raw", DLL = "truncated_lmm")
+
+  # Optimize
+  opt <- nlminb(obj$par, obj$fn, obj$gr)
+
+  # Get standard errors
+  rep <- sdreport(obj)
+  toc()
+
+  cat("\n\nPart 2 Random Effects Model Results:\n")
+  print(summary(rep))
+
+  # Store results
+  part_2_re <- list(
+    opt = opt,
+    report = rep,
+    obj = obj
+  )
+
+} else {
+  cat("⚠ TMB model file not found at:", cpp_file, "\n")
+  cat("  Skipping random effects model for Part 2\n")
+  part_2_re <- NULL
+}
+```
+
+### Table S.4 and S.5
+
+Generate supplementary tables for ADRC analysis:
+
+```{r adrc-tables}
+# Table S.4: Part 1 Random Effects Summary
+cat("\n\nTable S.4: Part 1 Model - Fixed Effects and Random Effects Variance\n")
+cat("====================================================================\n\n")
+
+# Fixed effects
+fe_p1 <- fixef(part_1_re)
+se_p1 <- sqrt(diag(vcov(part_1_re)))
+
+table_s4 <- data.frame(
+  Covariate = names(fe_p1),
+  Estimate = round(fe_p1, 3),
+  SE = round(se_p1, 3),
+  Z = round(fe_p1 / se_p1, 3),
+  P_value = format.pval(2 * pnorm(-abs(fe_p1 / se_p1)), digits = 3, eps = 0.001)
+)
+
+print(table_s4)
+
+# Random effects variance
+cat("\n\nRandom Effects Variance (ADRC) for Part 1:\n")
+print(re_var_p1)
+
+# Table S.5: Part 2 Random Effects Summary
+cat("\n\nTable S.5: Part 2 Model - Fixed Effects and Random Effects Variance\n")
+cat("====================================================================\n\n")
+
+if (!is.null(part_2_re)) {
+  # Extract results from TMB sdreport
+  rep_summary <- summary(part_2_re$report, "fixed")
+
+  # Beta coefficients (fixed effects)
+  beta_idx <- grep("beta", rownames(rep_summary))
+  beta_results <- rep_summary[beta_idx, ]
+
+  # Create covariate names
+  covariate_names <- c("(Intercept)", "t", "years_education", "is_female",
+                      "is_married", "comorbidity", "num_e4_1", "num_e4_2",
+                      "is_race_black", "is_race_other")
+
+  table_s5 <- data.frame(
+    Covariate = covariate_names,
+    Estimate = round(beta_results[, "Estimate"], 3),
+    SE = round(beta_results[, "Std. Error"], 3),
+    Z = round(beta_results[, "Estimate"] / beta_results[, "Std. Error"], 3),
+    P_value = format.pval(2 * pnorm(-abs(beta_results[, "Estimate"] /
+                                         beta_results[, "Std. Error"])),
+                         digits = 3, eps = 0.001)
+  )
+
+  print(table_s5)
+
+  # Random effects standard deviations
+  cat("\n\nRandom Effects Standard Deviations (ADRC) for Part 2:\n")
+  sd_b_idx <- grep("log_sd_b", rownames(rep_summary))
+  sd_b_results <- exp(rep_summary[sd_b_idx, "Estimate"])
+  names(sd_b_results) <- c("Intercept", "is_female", "is_married", "comorbidity",
+                          "num_e4_1", "num_e4_2", "is_race_black", "is_race_other")
+  print(round(sd_b_results, 4))
+
+  # Residual standard deviation
+  cat("\n\nResidual Standard Deviation:\n")
+  sigma_idx <- grep("log_sigma", rownames(rep_summary))
+  sigma <- exp(rep_summary[sigma_idx, "Estimate"])
+  cat("  σ =", round(sigma, 4), "\n")
+
+} else {
+  cat("⚠ Part 2 random effects model not available (TMB compilation failed)\n")
+}
+
+# Likelihood ratio test: Random effects vs. fixed effects
+cat("\n\nLikelihood Ratio Test: Random vs. Fixed Effects\n")
+cat("================================================\n\n")
+
+cat("Part 1 (logistic regression):\n")
+# Compare to fixed effects only model
+lrt_p1 <- anova(part_1_mod, part_1_re)
+print(lrt_p1)
+
+if (!is.null(part_2_re)) {
+  cat("\n\nPart 2 (truncated regression):\n")
+  # Compare to basic truncated regression
+  loglik_fixed <- logLik(fit_basic)
+  loglik_random <- -part_2_re$opt$objective
+
+  lr_stat <- 2 * (loglik_random - as.numeric(loglik_fixed))
+  df_diff <- ncol(Z)  # Number of random effect standard deviations
+  p_value <- pchisq(lr_stat, df = df_diff, lower.tail = FALSE)
+
+  cat("Log-likelihood (fixed effects only):", round(as.numeric(loglik_fixed), 2), "\n")
+  cat("Log-likelihood (random effects):", round(loglik_random, 2), "\n")
+  cat("LR statistic:", round(lr_stat, 2), "\n")
+  cat("df:", df_diff, "\n")
+  cat("p-value:", format.pval(p_value, digits = 3, eps = 0.001), "\n")
+
+  if (p_value < 0.05) {
+    cat("\n✓ Random effects significantly improve model fit (p < 0.05)\n")
+  } else {
+    cat("\nℹ Random effects do not significantly improve fit (p ≥ 0.05)\n")
+  }
+}
+```
+
+## 6.2 Temporal Sampling Sub-Analysis
+
+Use `death_year` to simulate historical analyses:
+
+NOTE: This will take about 15 minutes to run
+
+```{r temporal-analysis}
+cat("Temporal Sampling Sensitivity Analysis\n")
+cat("======================================\n\n")
+
+if (!"death_year" %in% names(mod_dat)) {
+  cat("⚠ death_year column not found in data\n")
+  cat("  This analysis requires simulated death years\n")
+} else {
+  cat("Analyzing model stability across different observation periods...\n\n")
+
+  # Define historical cutoff years
+  # Include 2015 for Table S.7
+  cutoff_years <- c(2010, 2015, 2020)
+
+  temporal_results <- list()
+
+  for (year in cutoff_years) {
+    cat("Fitting models as if data collection stopped in", year, "...\n")
+
+    # Filter data
+    historical_data <- mod_dat %>% filter(death_year <= year)
+
+    cat("  Sample size:", nrow(historical_data), "\n")
+
+    # Fit Part 1
+    part_1_historical <- glm(
+      got_dementia ~ t + years_education + is_female + is_married + comorbidity +
+        as.factor(num_e4) + is_race_black + is_race_other + l,
+      data = historical_data,
+      family = "binomial"
+    )
+
+    # Fit Part 2
+    dem_historical <- historical_data %>%
+      filter(got_dementia == 1) %>%
+      mutate(num_e4_1 = ifelse(num_e4 == 1, 1, 0),
+             num_e4_2 = ifelse(num_e4 == 2, 1, 0))
+
+    if (nrow(dem_historical) > 50) {  # Need sufficient sample
+      part_2_historical <- ltrc(
+        survival::Surv(mod_y, got_dementia) ~ t + years_education + is_female +
+          is_married + comorbidity + num_e4_1 + num_e4_2 + is_race_black + is_race_other,
+        data = dem_historical,
+        trunc_time = dem_historical$mod_l,
+        n_start = 10,
+        int_knots = 1
+      )
+
+      part_2_historical_clean <- get_clean_model(part_2_historical)
+
+      # Calculate standard errors and CIs
+      part1_se <- summary(part_1_historical)$coef[, 2]
+      part1_lower <- coef(part_1_historical) - 1.96 * part1_se
+      part1_upper <- coef(part_1_historical) + 1.96 * part1_se
+
+      part2_se <- sqrt(diag(vcov(part_2_historical_clean)))
+      part2_lower <- part_2_historical_clean$parameters$beta - 1.96 * part2_se
+      part2_upper <- part_2_historical_clean$parameters$beta + 1.96 * part2_se
+
+      # Store coefficients and CIs
+      temporal_results[[as.character(year)]] <- list(
+        year = year,
+        n = nrow(historical_data),
+        n_dementia = nrow(dem_historical),
+        part1_coef = coef(part_1_historical),
+        part2_coef = part_2_historical_clean$parameters$beta,
+        part1_lower = part1_lower,
+        part1_upper = part1_upper,
+        part2_lower = part2_lower,
+        part2_upper = part2_upper
+      )
+    }
+
+    cat("\n")
+  }
+
+  # Compare coefficients over time
+  cat("\nCoefficient Stability Analysis:\n")
+  cat("================================\n\n")
+
+  # Part 1 comparison
+  cat("Part 1 Coefficients Across Years:\n")
+  part1_comparison <- sapply(temporal_results, function(x) x$part1_coef[-1])  # Exclude intercept
+  colnames(part1_comparison) <- sapply(temporal_results, function(x) x$year)
+  print(round(part1_comparison, 3))
+
+  # Part 2 comparison
+  cat("\n\nPart 2 Coefficients Across Years:\n")
+  part2_comparison <- sapply(temporal_results, function(x) x$part2_coef)
+  colnames(part2_comparison) <- sapply(temporal_results, function(x) x$year)
+  print(round(part2_comparison, 3))
+}
+```
+
+### Figure S.6: Temporal Stability
+
+```{r figure-s6, fig.width=10, fig.height=6}
+if (exists("temporal_results") && length(temporal_results) > 0) {
+  # Extract ε4 covariate results (one and two alleles)
+  temporal_df <- data.frame()
+
+  for (i in seq_along(temporal_results)) {
+    res <- temporal_results[[i]]
+
+    # Part 1: as.factor(num_e4)1 and as.factor(num_e4)2 (positions 7 and 8)
+    # Part 2: num_e4_1 and num_e4_2 (positions 6 and 7)
+
+    year_data <- data.frame(
+      cutoff_year = as.Date(paste0(res$year, "-01-01")),
+      model = rep(c("Part 1", "Part 2"), each = 2),
+      label = rep(c("One ε4", "Two ε4"), 2),
+      estimate = c(res$part1_coef[7:8], res$part2_coef[6:7]),
+      ci_lower = c(res$part1_lower[7:8], res$part2_lower[6:7]),
+      ci_upper = c(res$part1_upper[7:8], res$part2_upper[6:7])
+    )
+
+    temporal_df <- bind_rows(temporal_df, year_data)
+  }
+
+  # Create plot matching paper format
+  fig_s6 <- temporal_df %>%
+    ggplot() +
+    geom_ribbon(
+      aes(x = cutoff_year, ymin = ci_lower, ymax = ci_upper),
+      fill = "gray", alpha = 0.5
+    ) +
+    geom_line(
+      aes(x = cutoff_year, y = estimate),
+      linewidth = 0.8
+    ) +
+    facet_grid(label ~ model, scales = "free_y") +
+    labs(
+      x = "Year Analysis was Run",
+      y = "Estimated Effect"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      text = element_text(family = "Times"),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 12),
+      axis.text = element_text(size = 11),
+      axis.title = element_text(size = 12),
+      panel.grid.minor = element_blank()
+    )
+
+  print(fig_s6)
+
+  # Save
+  ggsave(fs::path(RESULTS_DIR, "figure_s6_temporal_stability.png"),
+         fig_s6, width = 10, height = 6, dpi = 300)
+}
+```
+
+### Table S.7: Temporal Analysis (2015 Model Results)
+
+```{r table-s7}
+if (exists("temporal_results") && length(temporal_results) > 0) {
+  # Extract 2015 results
+  res_2015 <- temporal_results[["2015"]]
+
+  if (!is.null(res_2015)) {
+    cat("\n2015 Temporal Model Summary:\n")
+    cat("  Sample Size:", res_2015$n, "\n")
+    cat("  Dementia Cases:", res_2015$n_dementia, "\n")
+    cat("  % Dementia:", round(res_2015$n_dementia / res_2015$n * 100, 1), "%\n\n")
+
+    # Part 1: Extract coefficients (excluding intercept)
+    part1_coef <- res_2015$part1_coef[-1]
+    part1_lower <- res_2015$part1_lower[-1]
+    part1_upper <- res_2015$part1_upper[-1]
+    part1_se <- (part1_upper - part1_lower) / (2 * 1.96)
+    part1_z <- part1_coef / part1_se
+
+    # Part 2: Extract coefficients
+    part2_coef <- res_2015$part2_coef
+    part2_lower <- res_2015$part2_lower
+    part2_upper <- res_2015$part2_upper
+    part2_se <- (part2_upper - part2_lower) / (2 * 1.96)
+    part2_z <- part2_coef / part2_se
+
+    # Create table matching Table 2 format
+    table_s7 <- data.frame(
+      Covariate = c("t (time since age 65)", "Years of education", "Female",
+                    "Married", "≥1 Comorbidity", "1 ε4 allele", "2 ε4 alleles",
+                    "Black race", "Other race", "l (left truncation)"),
+      Part1_Est = round(part1_coef, 3),
+      Part1_CI = paste0("(", round(part1_lower, 3), ", ", round(part1_upper, 3), ")"),
+      Part1_P = format.pval(2 * pnorm(-abs(part1_z)), digits = 3, eps = 0.001),
+      Part2_Est = c(round(part2_coef, 3), "—"),
+      Part2_CI = c(paste0("(", round(part2_lower, 3), ", ", round(part2_upper, 3), ")"), "—"),
+      Part2_P = c(format.pval(2 * pnorm(-abs(part2_z)), digits = 3, eps = 0.001), "—")
+    )
+
+    knitr::kable(
+      table_s7,
+      caption = "Table S.7: Two-Part Model Coefficients (2015 Temporal Cutoff)",
+      col.names = c("Covariate", "Estimate", "95% CI", "P-value",
+                    "Estimate", "95% CI", "P-value"),
+      align = c("l", "r", "l", "r", "r", "l", "r")
+    )
+  } else {
+    cat("⚠ 2015 results not found in temporal_results.\n")
+    cat("  Make sure cutoff_years includes 2015.\n")
+  }
+} else {
+  cat("⚠ Temporal analysis results not available.\n")
+}
+```
+
+## 6.3 Weighted Analysis
+
+Fit models with inverse probability weighting:
+
+```{r weighted-analysis}
+weights_3 <- list(
+  num_e4 = 0:2,
+  is_race_black = 0:1,
+  is_race_other = 0:1,
+  is_female = 0:1
+) %>%
+  expand.grid() %>%
+  filter(!(is_race_black == 1 & is_race_other == 1)) %>%
+  arrange(num_e4, is_race_black, is_race_other, is_female) %>%
+  mutate(
+    obs_props = mod_dat %>% group_by(num_e4, is_race_black, is_race_other, is_female) %>% summarize(n = n(), pct = n() / nrow(.)) %>% pull(pct),
+    pop_props = c(
+      0.267784, # num_e4: 0 | race: white | sex: male
+      0.267784, # num_e4: 0 | race: white | sex: female
+      0.04117, # num_e4: 0 | race: other | sex: male
+      0.04117, # num_e4: 0 | race: other | sex: female
+      0.049046, # num_e4: 0 | race: black | sex: male
+      0.049046, # num_e4: 0 | race: black | sex: female
+      0.097614, # num_e4: 1 | race: white | sex: male
+      0.097614, # num_e4: 1 | race: white | sex: female
+      0.0150075, # num_e4: 1 | race: other | sex: male
+      0.0150075, # num_e4: 1 | race: other | sex: female
+      0.0178785, # num_e4: 1 | race: black | sex: male
+      0.0178785, # num_e4: 1 | race: black | sex: female
+      0.008602, # num_e4: 2 | race: white | sex: male
+      0.008602, # num_e4: 2 | race: white | sex: female
+      0.0013225, # num_e4: 2 | race: other | sex: male
+      0.0013225, # num_e4: 2 | race: other | sex: female
+      0.0015755, # num_e4: 2 | race: black | sex: male
+      0.0015755  # num_e4: 2 | race: black | sex: female
+    ),
+    weight = pop_props / obs_props
+  ) %>%
+  select(-obs_props, -pop_props)
+
+
+mod_dat <- mod_dat %>%
+  left_join(weights_3, by = c("num_e4", "is_race_black", "is_race_other", "is_female"))
+
+part_1_mod <- glm(
+  got_dementia ~ t + years_education + is_female + is_married + comorbidity + is_race_black + is_race_other + as.factor(num_e4) + l,
+  data = mod_dat,
+  family = "binomial",
+  weights = mod_dat$weight
+)
+summary(part_1_mod)
+# note that standard errors are not correct here, need to use sandwich estimator if you want to do inference
+vcov_robust <- vcovHC(part_1_mod, type = "HC0")
+coeftest(part_1_mod, vcov = vcov_robust)
+
+dem_mod_dat <- mod_dat %>%
+  filter(got_dementia == 1) %>%
+  mutate(
+    num_e4_1 = ifelse(num_e4 == 1, 1, 0),
+    num_e4_2 = ifelse(num_e4 == 2, 1, 0)
+  )
+
+tictoc::tic()
+part_2_mod <- ltrc(
+  survival::Surv(mod_y, got_dementia) ~ t + years_education + is_female + is_married + comorbidity + is_race_black + is_race_other + num_e4_1 + num_e4_2,
+  data = dem_mod_dat, trunc_time = dem_mod_dat$mod_l, n_start = 10, int_knots = 1, weights = dem_mod_dat$weight
+)
+tictoc::toc()
+
+part_2_mod_clean <- get_clean_model(part_2_mod)
+part_2_mod_clean$parameters$beta
+vcov(part_2_mod_clean) %>% diag() %>% sqrt()
+
+readr::write_rds(part_2_mod_clean, fs::path(DATA_DIR, "weighted_pt_2_mod.rds"))
+
+```
+
+### Table S.8: Weighted Analysis Results
+
+```{r}
+cat("Part 1 Model - Weighted Analysis Results\n")
+# CI
+beta <- coef(part_1_mod)
+se <- sqrt(diag(vcov_robust))
+cbind(
+  est = beta,
+  lower = beta - 1.96 * se,
+  upper = beta + 1.96 * se
+)
+
+cat("\n\nPart 2 Model - Weighted Analysis Results\n")
+test_mod <- readr::read_rds(fs::path(DATA_DIR, "weighted_pt_2_mod.rds"))
+beta <- test_mod$parameters$beta
+se <- sqrt(diag(vcov(test_mod)))
+cbind(
+  est = beta,
+  lower = beta - 1.96 * se,
+  upper = beta + 1.96 * se
+)
+```
+
+---
+
+# 7. Simulation Study
+
+This section demonstrates the simulation methodology used in the paper to validate the GHI estimation procedure. The simulation follows the exact code from `01_code_for_simulation_on_server.R`, omitting the bootstrap variance calculation since it is too time intensive. That code can be seen in the original file, and run following the instructions in the section on running the simulation on a server.
+
+## Simulation Setup
+
+```{r simulation-setup}
+cat("GHI Model Validation via Simulation\n")
+cat("====================================\n\n")
+
+# Set true parameter values (used in paper)
+alpha <- c(1.7, 0.05, 0.05)    # For generating t: log(t) ~ alpha[1] + alpha[2]*x_1 + alpha[3]*x_2
+beta <- c(-0.1, -0.5, 2, 0.2)  # Part 1 coefficients: t, x_1, x_2, l
+omega <- c(0, -0.1, 1, -1)     # Part 2 coefficients: intercept, t, x_1, x_2
+
+cat("True parameters:\n")
+cat("  α (t generation):", alpha, "\n")
+cat("  β (Part 1 model):", beta, "\n")
+cat("  ω (Part 2 model):", omega, "\n\n")
+
+# Define prediction grid for GHI estimates
+covariate_grid <- list(
+  t = 7:12,                          # Age at death - 65
+  x_1 = seq(-1.5, 1.5, by = 0.25),  # Continuous covariate
+  x_2 = c(0, 1),                     # Binary covariate
+  l = 1                              # Left truncation (age at entry - 65)
+) %>%
+  expand.grid() %>%
+  mutate(
+    l_over_t = l / t,
+    eps_lower = log(l_over_t / (1 - l_over_t)) - omega[2] * t - omega[3] * x_1 - omega[4] * x_2
+  )
+
+cat("Prediction grid:\n")
+cat("  t values:", range(covariate_grid$t), "\n")
+cat("  x_1 values:", range(covariate_grid$x_1), "\n")
+cat("  x_2 values:", unique(covariate_grid$x_2), "\n")
+cat("  Total grid points:", nrow(covariate_grid), "\n\n")
+```
+
+## Simulation Function
+
+```{r simulation-function}
+# Main simulation function (matches server code exactly)
+ghi_sim_run <- function(i, sample_size, error_fn = rnorm, error_name = "Standard Normal",
+                        alpha = c(1.7, 0.05, 0.05),
+                        beta = c(-0.1, -0.5, 2, 0.2),
+                        omega = c(0, -0.1, 1, -1),
+                        covariate_grid) {
+
+  cat("Iteration", i, "\n")
+
+  # Step 1: Generate true data (before truncation/selection)
+  true_dat <- data.frame(
+    l = runif(4 * sample_size, 0, 5),      # Entry age - 65
+    x_1 = runif(4 * sample_size, -3, 3),   # Continuous covariate
+    x_2 = rbinom(4 * sample_size, 1, 0.4)  # Binary covariate
+  ) %>%
+    mutate(
+      # Generate t (age at death - 65)
+      t = exp(alpha[1] + alpha[2] * x_1 + alpha[3] * x_2 + rnorm(4 * sample_size, 0, 0.3)),
+      # Generate error term
+      eps = error_fn(4 * sample_size),
+      # Generate y (proportional dementia timing)
+      y = exp(omega[1] + omega[2] * t + omega[3] * x_1 + omega[4] * x_2 + eps) /
+          (1 + exp(omega[1] + omega[2] * t + omega[3] * x_1 + omega[4] * x_2 + eps)),
+      # Dementia age (s = y*t)
+      s = y * t
+    )
+
+  # Step 2: Apply left-truncation (keep only s > l and t > l)
+  obs_dat <- true_dat %>%
+    filter(s > l, t > l) %>%
+    mutate(
+      # Generate dementia indicator from Part 1 model
+      prob_disease = exp(beta[1] * t + beta[2] * x_1 + beta[3] * x_2 + beta[4] * l) /
+                     (1 + exp(beta[1] * t + beta[2] * x_1 + beta[3] * x_2 + beta[4] * l)),
+      delta_s = rbinom(nrow(.), 1, prob_disease),
+      # Set y=1 for non-dementia cases
+      y = ifelse(delta_s, y, 1)
+    )
+
+  # Step 3: Sample down to target size
+  sim_dat <- obs_dat %>% sample_n(size = sample_size)
+
+  # Step 4: Fit Part 1 model
+  part_1_mod <- glm(delta_s ~ t + x_1 + x_2 + l, data = sim_dat, family = binomial)
+
+  # Step 5: Fit Part 2 model (on dementia cases only)
+  got_s <- sim_dat %>%
+    filter(delta_s == 1) %>%
+    mutate(
+      mod_y = log(y / (1 - y)),
+      scaled_l = l / t,
+      mod_l = log(scaled_l / (1 - scaled_l))
+    )
+
+  part_2_mod <- tryCatch({
+    ltrc(survival::Surv(mod_y, delta_s) ~ t + x_1 + x_2,
+         data = got_s,
+         trunc_time = got_s$mod_l,
+         int_knots = 2)  # Using 2 interior knots
+  }, error = function(e) {
+    print(e)
+    return(NULL)
+  })
+
+  if (is.null(part_2_mod)) return(NULL)
+
+  part_2_mod_clean <- get_clean_model(part_2_mod)
+  beta_hat <- part_1_mod$coefficients[-1]
+  omega_hat <- part_2_mod_clean$parameters$beta
+  part_2_residuals <- c(part_2_mod_clean$data$residuals)
+
+  # Step 6: Generate predictions across covariate grid
+  pred_df <- data.frame()
+  lps <- covariate_grid$t * omega_hat[1] + covariate_grid$x_1 * omega_hat[2] +
+         covariate_grid$x_2 * omega_hat[3]
+
+  for (j in 1:nrow(covariate_grid)) {
+    # Part 1: Probability of NOT getting dementia
+    mu_0 <- 1 - predict(part_1_mod, newdata = covariate_grid[j, 1:4], type = "response")
+
+    # Part 2: Expected Y given dementia via Kaplan-Meier
+    sub_lp <- lps[j]
+    cutoff <- covariate_grid[j, 6]
+    tau <- got_s %>%
+      mutate(
+        l_resid_scale = mod_l - omega_hat[1] * t - omega_hat[2] * x_1 - omega_hat[3] * x_2
+      ) %>%
+      pull(l_resid_scale)
+
+    km_df <- data.frame(epsilon = part_2_residuals, tau = tau, delta = 1) %>%
+      mutate(
+        g_of_e = exp(sub_lp + epsilon) / (1 + exp(sub_lp + epsilon)),
+        g_of_t = exp(sub_lp + tau) / (1 + exp(sub_lp + tau))
+      ) %>%
+      filter(epsilon > cutoff)
+
+    km_fit <- tryCatch({
+      survfit(Surv(time = g_of_t, time2 = g_of_e, event = delta) ~ 1, data = km_df)
+    }, error = function(e) NULL)
+
+    if (is.null(km_fit)) next
+
+    km_times <- c(0, km_fit$time)
+    km_surv <- c(1, km_fit$surv)
+    km_estimate <- sum(km_surv[-length(km_surv)] * diff(km_times))
+
+    # GHI = (1-mu) + mu * E[Y | dementia]
+    area_expectation <- mu_0 + (1 - mu_0) * km_estimate
+
+    # Variance calculation
+    g_n <- mu_0
+    x_mat <- matrix(c(1, as.numeric(covariate_grid[j, 1:4])), ncol = 1)
+    sigma_11 <- (g_n * (1 - g_n))^2 * t(x_mat) %*% vcov(part_1_mod) %*% x_mat
+
+    tmp_preds <- data.frame(
+      t = covariate_grid[j, 1],
+      x_1 = covariate_grid[j, 2],
+      x_2 = covariate_grid[j, 3],
+      l = covariate_grid[j, 4],
+      mu_0 = mu_0,
+      expected_y = km_estimate,
+      ghi = area_expectation,
+      sigma_11 = sigma_11
+    )
+
+    pred_df <- rbind(pred_df, tmp_preds)
+  }
+
+  # Return results
+  list(
+    iter_num = i,
+    n = sample_size,
+    pct_truncation = 1 - nrow(obs_dat) / nrow(true_dat),
+    error_name = error_name,
+    beta = beta,
+    omega = omega,
+    beta_hat = beta_hat,
+    omega_hat = omega_hat,
+    data = sim_dat,
+    part_1_model = part_1_mod,
+    part_2_model = part_2_mod_clean,
+    prediction_df = pred_df
+  )
+}
+
+cat("✓ Simulation function defined\n")
+```
+
+## Local Simulation (Small Scale)
+
+```{r simulation-local, eval=FALSE}
+cat("\nRunning Small-Scale Demonstration\n")
+cat("==================================\n\n")
+
+SAMPLE_SIZE <- 400
+N_SIM <- 5
+
+cat("⚠ This is a minimal demonstration\n")
+cat("  Sample size:", SAMPLE_SIZE, "\n")
+cat("  Replications:", N_SIM, "\n")
+cat("  For production results, use server scripts with n=400, R=300 bootstrap\n\n")
+
+big_result <- list()
+
+tictoc::tic()
+for (m in 1:N_SIM) {
+  result <- ghi_sim_run(
+    i = m,
+    sample_size = SAMPLE_SIZE,
+    error_fn = rnorm,
+    error_name = "Standard Normal",
+    alpha = alpha,
+    beta = beta,
+    omega = omega,
+    covariate_grid = covariate_grid
+  )
+
+  if (!is.null(result)) {
+    big_result <- append(big_result, list(result))
+  }
+}
+tictoc::toc()
+
+cat("\n✓ Simulation complete\n")
+cat("  Successful runs:", length(big_result), "/", N_SIM, "\n")
+
+# Summary of results
+if (length(big_result) > 0) {
+  cat("\nParameter Recovery:\n")
+  cat("===================\n\n")
+
+  # Extract estimates
+  beta_estimates <- t(sapply(big_result, function(x) x$beta_hat))
+  omega_estimates <- t(sapply(big_result, function(x) x$omega_hat))
+
+  cat("Part 1 (β) - True vs Estimated (mean):\n")
+  comparison_beta <- data.frame(
+    Parameter = c("t", "x_1", "x_2", "l"),
+    True = beta,
+    Mean_Est = colMeans(beta_estimates),
+    Bias = colMeans(beta_estimates) - beta,
+    SD = apply(beta_estimates, 2, sd)
+  )
+  print(comparison_beta)
+
+  cat("\nPart 2 (ω) - True vs Estimated (mean):\n")
+  cat("  Note: ltrc model does not estimate intercept (fixed at 0)\n\n")
+  comparison_omega <- data.frame(
+    Parameter = c("t", "x_1", "x_2"),
+    True = omega[2:4],  # Skip intercept (omega[1] = 0, not estimated)
+    Mean_Est = colMeans(omega_estimates),
+    Bias = colMeans(omega_estimates) - omega[2:4],
+    SD = apply(omega_estimates, 2, sd)
+  )
+  print(comparison_omega)
+
+  cat("\nTruncation rates:\n")
+  trunc_rates <- sapply(big_result, function(x) x$pct_truncation)
+  cat("  Mean:", round(mean(trunc_rates), 3), "\n")
+  cat("  Range:", round(range(trunc_rates), 3), "\n")
+
+  # Aggregate prediction results across covariate grid
+  cat("\n\nPrediction Grid Results:\n")
+  cat("========================\n\n")
+
+  # Combine all prediction dataframes
+  all_preds <- bind_rows(lapply(1:length(big_result), function(i) {
+    big_result[[i]]$prediction_df %>%
+      mutate(iter = i)
+  }))
+
+  # Aggregate by covariate values
+  pred_summary <- all_preds %>%
+    group_by(t, x_1, x_2, l) %>%
+    summarize(
+      n_reps = n(),
+      mean_mu_0 = mean(mu_0, na.rm = TRUE),
+      mean_expected_y = mean(expected_y, na.rm = TRUE),
+      mean_ghi = mean(ghi, na.rm = TRUE),
+      sd_ghi = sd(ghi, na.rm = TRUE),
+      se_ghi = sd(ghi, na.rm = TRUE) / sqrt(n()),
+      .groups = "drop"
+    ) %>%
+    arrange(t, x_1, x_2)
+
+  cat("Total grid points:", nrow(pred_summary), "\n")
+  cat("Replications per point:", unique(pred_summary$n_reps), "\n\n")
+
+  # Display sample of results (first 20 rows)
+  cat("Sample of prediction grid (first 20 rows):\n\n")
+  pred_display <- pred_summary %>%
+    select(t, x_1, x_2, mean_mu_0, mean_expected_y, mean_ghi, se_ghi) %>%
+    head(20)
+
+  print(knitr::kable(
+    pred_display,
+    digits = 4,
+    col.names = c("t", "x_1", "x_2", "P(No Dem)", "E[Y|Dem]", "GHI", "SE(GHI)"),
+    caption = "Prediction Grid Results Summary (Sample)"
+  ))
+
+  # Summary statistics across grid
+  cat("\n\nSummary across entire grid:\n")
+  cat("  GHI range:", round(range(pred_summary$mean_ghi), 4), "\n")
+  cat("  Mean GHI:", round(mean(pred_summary$mean_ghi), 4), "\n")
+  cat("  Mean SE(GHI):", round(mean(pred_summary$se_ghi), 4), "\n")
+}
+```
+
+## Large-Scale Simulation (Server Instructions)
+
+The production simulation used the following specification:
+- **Sample size**: n = 400, 800, or 1600 per replication
+- **Replications**: N_SIM = 5 per file
+- **Bootstrap samples**: 300 per replication (for variance estimation)
+- **Total files**: 50 (yielding 250 total replications)
+
+```markdown
+# Large-Scale Simulation on Server
+
+## Setup
+
+1. Upload scripts to server:
+   - `01_code_for_simulation_on_server.R` (main simulation code)
+   - `02_run_simulation_parallel.sh` (parallel execution script)
+
+2. Create output directory:
+   ```bash
+   mkdir -p ghi_sim_res
+   ```
+
+3. Review parameters in `01_code_for_simulation_on_server.R`:
+   - `N_SIM = 5`: Number of simulation runs per file
+   - `SAMPLE_SIZE = 400`: Sample size per replication (400, 800, or 1600)
+   - `n_bootstrap = 300`: Bootstrap samples for variance (optional, set to 0 to skip)
+   - True parameters: α, β, ω as defined in simulation setup
+
+## Running
+
+### Option A: Bash Script (Background Jobs)
+
+```bash
+cd inst/paper_code
+bash 02_run_simulation_parallel.sh
+wait  # Wait for all jobs to complete
+```
+
+### Option B: Manual Parallel Execution
+
+```bash
+# Run 50 files in parallel (FILE_NUM = 1 to 50)
+for i in {1..50}; do
+  Rscript 01_code_for_simulation_on_server.R $i > out_$i.txt 2>&1 &
+done
+wait
+```
+
+## Expected Runtime
+
+- **Per file** (5 replications + 300 bootstrap each): 2-4 hours
+- **Total (50 parallel jobs)**: 2-4 hours wall time
+- **Total (sequential)**: 100-200 hours
+
+## Output
+
+- 50 `.rds` files in `ghi_sim_res/`
+- Each file: `error_a_400_{FILE_NUM}.rds`
+- Each contains 5 simulation results with:
+  - Parameter estimates (β, ω)
+  - Prediction dataframes across covariate grid
+  - Bootstrap variance estimates (if n_bootstrap > 0)
+  - Truncation rates
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+# Summary and Next Steps
+
+## What We Did
+
+- *Setup**: Configured environment and loaded simulated NACC data
+- *Data Exploration**: Created Table 1 with descriptive statistics
+- *Model Fitting**: Fit two-part model (GLM + LTRC)
+- *Model Analysis**: Generated Table 2 and Figures 1-2
+- *Model Checking**: Comprehensive diagnostics for both model parts
+- *Sensitivity Analyses**: ADRC, temporal, and weighted analyses
+- *Simulation Study**: Demonstrated methodology (small-scale)
+
+## For Reviewers
+
+This notebook provides a complete walkthrough of our methodology using simulated data. Key points:
+
+1. **All code is transparent** - every analysis can be inspected and modified
+2. **Simulated data mimics real NACC structure** - methods are identical
+3. **Results differ from paper** - expected due to simulated vs. real data
+4. **Computationally intensive parts** - marked with warnings, can be run on server
+
+## Reproducing Paper Results
+
+To reproduce **exact** results from the paper:
+
+1. Obtain real NACC data (requires data use agreement)
+2. Run `03_create_NACC_model_data.R` to prepare data
+3. Execute remaining scripts in order (see Paper_Reproduction_NACC.md.md)
+4. For bootstrap variance: use server scripts (06, 07)
+5. For simulation study: use server scripts (01, 02)
+
+## Questions?
+
+For questions about this analysis or the methods, please contact the authors at information provided in the paper.
+
+---
+
+**Document generated:** `r Sys.time()`
